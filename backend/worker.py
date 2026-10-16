@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import subprocess
 import tempfile
 import uuid
 
@@ -274,6 +275,82 @@ def apply_organization(root, photos, mode, strategy, expected_plan, destination=
     send({'type': 'done', 'count': completed, 'skipped': skipped, 'journal': str(journal)})
 
 
+
+def metadata(root, photo):
+    path = source_path(root, photo['path'])
+    if fingerprint(path) != photo['stamp']:
+        raise ValueError('File đã thay đổi; hãy quét lại')
+    stat = path.stat()
+    detail = {'general': {'Tên file': path.name, 'Đường dẫn': str(path), 'Loại': media_kind(path),
+                         'Dung lượng (bytes)': stat.st_size, 'Sửa đổi (Unix)': stat.st_mtime}, 'warnings': []}
+    if media_kind(path) == 'image':
+        try:
+            with Image.open(path) as image:
+                detail['image'] = {'Định dạng': image.format, 'Chiều rộng': image.width, 'Chiều cao': image.height,
+                                   'Chế độ màu': image.mode, 'Số khung': getattr(image, 'n_frames', 1)}
+                from PIL.ExifTags import TAGS, GPSTAGS
+                exif = image.getexif()
+                detail['exif'] = {TAGS.get(key, str(key)): str(value)[:2000] for key, value in exif.items() if key not in (34665, 34853)}
+                for tag, labels in [(34665, TAGS), (34853, GPSTAGS)]:
+                    try:
+                        for key, value in exif.get_ifd(tag).items():
+                            detail['exif'][('GPS ' if tag == 34853 else '') + labels.get(key, str(key))] = str(value)[:2000]
+                    except (KeyError, TypeError, ValueError):
+                        pass
+        except Exception as error:
+            detail['warnings'].append('Không đọc được metadata ảnh: ' + str(error))
+    else:
+        try:
+            probe = subprocess.run(['ffprobe', '-v', 'error', '-show_format', '-show_streams', '-of', 'json', str(path)], capture_output=True, text=True, timeout=15)
+            if probe.returncode:
+                raise ValueError('ffprobe không đọc được video hoặc định dạng chưa hỗ trợ')
+            data = json.loads(probe.stdout)
+            fmt = data.get('format', {})
+            detail['video'] = {key: fmt[key] for key in ('format_name', 'duration', 'bit_rate', 'size', 'tags') if key in fmt}
+            detail['streams'] = [{key: stream[key] for key in ('codec_type', 'codec_name', 'width', 'height', 'avg_frame_rate', 'sample_rate', 'channels', 'tags') if key in stream} for stream in data.get('streams', [])]
+        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError) as error:
+            detail['warnings'].append('Cần ffprobe (FFmpeg) để đọc metadata video: ' + str(error))
+    if fingerprint(path) != photo['stamp']:
+        raise ValueError('File thay đổi khi đọc metadata; hãy quét lại')
+    return detail
+
+
+def trash_files(root, photos, send=emit, trash=None):
+    if not photos:
+        raise ValueError('Chưa chọn file để xóa')
+    # Validate every entry before changing any file. Never fall back to permanent deletion.
+    paths = []
+    for photo in photos:
+        path = source_path(root, photo['path'])
+        if path in paths or fingerprint(path) != photo['stamp']:
+            raise ValueError('Danh sách trùng hoặc file đã thay đổi; hãy quét lại')
+        paths.append(path)
+    if trash is None:
+        from send2trash import send2trash
+        trash = send2trash
+    journal = root / f'image-library-trash-{uuid.uuid4().hex}.jsonl'
+    count = 0
+    with journal.open('x', encoding='utf-8') as log:
+        def record(event):
+            log.write(json.dumps(event, ensure_ascii=False) + '\n')
+            log.flush()
+            os.fsync(log.fileno())
+        for index, (photo, path) in enumerate(zip(photos, paths)):
+            try:
+                if fingerprint(path) != photo['stamp']:
+                    raise ValueError('File đã thay đổi; hãy quét lại')
+                record({'type': 'pending_trash', 'path': str(path)})
+                trash(str(path))
+                record({'type': 'trashed', 'path': str(path)})
+                send({'type': 'trashed', 'path': photo['path']})
+                count += 1
+            except Exception as error:
+                record({'type': 'error', 'path': str(path), 'message': str(error)})
+                send({'type': 'photo_error', 'path': photo['path'], 'message': str(error)})
+            send({'type': 'progress', 'current': index + 1, 'total': len(paths)})
+    send({'type': 'done', 'count': count, 'journal': str(journal)})
+
+
 def main():
     try:
         request = json.loads(sys.stdin.readline())
@@ -281,6 +358,11 @@ def main():
         operation = request['operation']
         if operation == 'scan':
             scan(root)
+        elif operation == 'metadata':
+            emit({'type': 'metadata', 'detail': metadata(root, request['photos'][0])})
+            emit({'type': 'done', 'count': 1})
+        elif operation == 'trash':
+            trash_files(root, request['photos'])
         elif operation == 'classify':
             classify(root, request['photos'], float(request.get('threshold', .55)))
         elif operation == 'plan':

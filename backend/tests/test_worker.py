@@ -221,6 +221,59 @@ class WorkerTests(unittest.TestCase):
         events = [json.loads(line) for line in result.stdout.splitlines()]
         self.assertEqual([e['type'] for e in events], ['photo', 'done'])
 
+    def test_image_metadata_exif_and_no_mutation(self):
+        path = self.root / 'camera.jpg'
+        exif = Image.Exif()
+        exif[271] = 'Test Camera'
+        exif[272] = 'Model One'
+        Image.new('RGB', (80, 60)).save(path, exif=exif)
+        before = path.read_bytes()
+        detail = worker.metadata(self.root, self.entry(path))
+        self.assertEqual(detail['image']['Chiều rộng'], 80)
+        self.assertEqual(detail['image']['Chiều cao'], 60)
+        self.assertEqual(detail['exif']['Make'], 'Test Camera')
+        self.assertEqual(detail['general']['Dung lượng (bytes)'], len(before))
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_metadata_rejects_changed_file(self):
+        with self.assertRaises(ValueError):
+            worker.metadata(self.root, {**self.photo, 'stamp': 'changed'})
+
+    def test_video_metadata_reports_missing_ffprobe(self):
+        path = self.root / 'clip.mp4'
+        path.write_bytes(b'fixture')
+        with patch.object(worker.subprocess, 'run', side_effect=FileNotFoundError('ffprobe')):
+            detail = worker.metadata(self.root, self.entry(path))
+        self.assertTrue(detail['warnings'])
+        self.assertEqual(detail['general']['Loại'], 'video')
+
+    def test_trash_prevalidates_entire_selection(self):
+        calls = []
+        with self.assertRaises(ValueError):
+            worker.trash_files(self.root, [self.photo, {**self.photo, 'path': '../escape.png'}], self.events.append, calls.append)
+        self.assertFalse(calls)
+        self.assertTrue(self.path.exists())
+
+    def test_trash_failure_never_falls_back_to_unlink(self):
+        def unavailable(path):
+            raise OSError('Trash unavailable')
+        worker.trash_files(self.root, [self.photo], self.events.append, unavailable)
+        self.assertTrue(self.path.exists())
+        self.assertEqual(self.events[-1]['count'], 0)
+        self.assertTrue(any(e['type'] == 'photo_error' for e in self.events))
+
+    def test_trash_moves_to_recoverable_location(self):
+        recovery = self.base / 'recovery'
+        recovery.mkdir()
+        original = self.path.read_bytes()
+        def trash(path):
+            Path(path).rename(recovery / Path(path).name)
+        worker.trash_files(self.root, [self.photo], self.events.append, trash)
+        self.assertFalse(self.path.exists())
+        self.assertEqual((recovery / self.path.name).read_bytes(), original)
+        self.assertEqual(self.events[-1]['count'], 1)
+        self.assertTrue(any(e['type'] == 'trashed' for e in self.events))
+
     def test_protocol_errors_exit_nonzero(self):
         result = subprocess.run([sys.executable, str(Path(worker.__file__))], input='{}', text=True, capture_output=True)
         self.assertNotEqual(result.returncode, 0)

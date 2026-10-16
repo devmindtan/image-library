@@ -80,11 +80,83 @@ fn cancel_worker(state: tauri::State<'_, WorkerState>, job_id: String) -> Result
     }
     Ok(())
 }
+fn resolve_media(source: &str, path: &str) -> Result<std::path::PathBuf, String> {
+    use std::path::{Component, Path};
+    let root = std::fs::canonicalize(source).map_err(|e| e.to_string())?;
+    let relative = Path::new(path);
+    if relative
+        .components()
+        .any(|c| !matches!(c, Component::Normal(_)))
+        || relative.as_os_str().is_empty()
+    {
+        return Err("Đường dẫn không hợp lệ".into());
+    }
+    let mut candidate = root.clone();
+    for part in relative.components() {
+        candidate.push(part.as_os_str());
+        if std::fs::symlink_metadata(&candidate)
+            .map_err(|e| e.to_string())?
+            .file_type()
+            .is_symlink()
+        {
+            return Err("Không mở liên kết tượng trưng".into());
+        }
+    }
+    let file = std::fs::canonicalize(candidate).map_err(|e| e.to_string())?;
+    if !file.starts_with(&root) || !file.is_file() {
+        return Err("File phải nằm trong thư mục đang mở".into());
+    }
+    Ok(file)
+}
+#[tauri::command]
+fn authorize_media(app: tauri::AppHandle, source: String, path: String) -> Result<String, String> {
+    let file = resolve_media(&source, &path)?;
+    app.asset_protocol_scope()
+        .allow_file(&file)
+        .map_err(|e| e.to_string())?;
+    Ok(file.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_media;
+    #[test]
+    fn local_media_stays_in_root() {
+        let root = std::env::temp_dir().join(format!(
+            "image-library-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(root.join("nested/photo.jpg"), b"fixture").unwrap();
+        let source = root.to_str().unwrap();
+        assert!(resolve_media(source, "nested/photo.jpg").is_ok());
+        assert!(resolve_media(source, "../outside.jpg").is_err());
+        assert!(resolve_media(source, root.join("nested/photo.jpg").to_str().unwrap()).is_err());
+        assert!(resolve_media(source, "nested").is_err());
+        assert!(resolve_media(source, "").is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("nested/photo.jpg"), root.join("linked.jpg"))
+                .unwrap();
+            assert!(resolve_media(source, "linked.jpg").is_err());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(WorkerState::default())
-        .invoke_handler(tauri::generate_handler![run_worker, cancel_worker])
+        .invoke_handler(tauri::generate_handler![
+            run_worker,
+            cancel_worker,
+            authorize_media
+        ])
         .build(tauri::generate_context!())
         .expect("Cannot build desktop app")
         .run(|app, event| {

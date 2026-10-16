@@ -8,7 +8,10 @@ File `photo_manager.html` là bản prototype cũ, được giữ nguyên.
 - Mở **thư mục hiện có** để hiển thị ảnh/video trực tiếp, kể cả thư mục con. Quét chỉ đọc, không yêu cầu sao chép.
 - 4 chế độ xem: **Lưới, Gọn, Danh sách, Thư mục**. Có tìm kiếm theo đường dẫn, lọc ảnh/video/nhóm, sắp xếp tên, dung lượng và thời gian. Chế độ xem được nhớ trên máy.
 - Dung lượng từng file, tổng thư viện, tổng ảnh/video, tổng kết quả đang lọc và tổng các file đã chọn. Dùng kích thước file logic, đơn vị KB/MB/GB tính theo 1024; không phải dung lượng block thực tế trên đĩa.
-- Video được nhận diện theo đuôi file và gán nhóm `videos`; **không giải mã hoặc phân tích nội dung video, không gọi CLIP**. Hiển thị biểu tượng video thay cho thumbnail.
+- Bấm thumbnail hoặc **Xem / Chi tiết** để mở ảnh gốc, phóng to/thu nhỏ, chuyển file trước/sau; video có trình phát với thanh thời gian, âm lượng và toàn màn hình theo khả năng WebView.
+- Metadata ảnh: kích thước, định dạng, chế độ màu, EXIF (thiết bị, thời gian, GPS nếu có). Video: thời lượng, codec, độ phân giải, tốc độ khung hình, luồng âm thanh khi có `ffprobe`. Metadata chỉ đọc, chưa hỗ trợ chỉnh sửa.
+- **Xóa** từng file hoặc chọn nhiều file: luôn xác nhận danh sách rồi chuyển vào **Thùng rác hệ điều hành**, có nhật ký và cập nhật số lượng/dung lượng. Không có bước xóa vĩnh viễn dự phòng; khôi phục trong Thùng rác hệ điều hành.
+- Video được nhận diện theo đuôi file và gán nhóm `videos`; **không giải mã hoặc phân tích nội dung video, không gọi CLIP**. Hiển thị biểu tượng video thay cho thumbnail; bấm vào để phát file gốc.
 - Ảnh có thumbnail cục bộ. Ảnh không tạo được thumbnail vẫn xuất hiện và được tính dung lượng, kèm thông báo lỗi.
 - Mặc định phân nhóm nội dung ảnh bằng **AI**, video luôn vào nhóm Video. Nút **Phân loại ảnh bằng AI** luôn hiển thị; bấm nút cũng chọn lại cách phân nhóm theo nội dung. Tùy chọn **Ảnh / Video** không cần AI hoặc tải mô hình. Phân nhóm nội dung ảnh dùng CLIP zero-shot (`openai/clip-vit-base-patch32`): phong cảnh, chân dung, tài liệu, động vật, phương tiện, ẩm thực, kiến trúc.
 - Điểm thấp hơn ngưỡng vào `review` (Cần xem lại). Điểm softmax tương đối giữa nhãn, **không phải xác suất dự đoán đúng**. Có thể chọn nhóm ảnh thủ công mà không chạy AI.
@@ -54,6 +57,13 @@ Lần phân loại đầu cần tải CLIP (~600 MB) từ Hugging Face. Cho phé
 
 Chỉ xem giao diện: `npm run dev`. Trình duyệt thông thường không chạy worker; nút minh họa dùng dữ liệu giả lập và không thực hiện phân loại AI, di chuyển hoặc sao chép.
 
+## Nhãn ảnh, bộ lọc và thư mục đích khác nhau thế nào?
+
+- **Nhãn ảnh** là kết quả AI hoặc lựa chọn thủ công (Phong cảnh, Chân dung…). Đổi nhãn chỉ đổi thông tin trong phiên, chưa ghi file.
+- **Lọc theo nhãn ảnh** ở thanh bên chỉ quyết định những file xuất hiện trên màn hình; không thay đổi thư mục.
+- **Tạo thư mục theo** trong khung sắp xếp quyết định nơi lưu sau xác nhận. Theo nội dung: `landscape/`, `portrait/`… và `videos/`. Theo loại: `images/` và `videos/`.
+- Chỉ **Xác nhận di chuyển/sao chép** mới thay đổi vị trí hoặc tạo bản sao. **Xác nhận chuyển vào Thùng rác** là thao tác xóa riêng biệt.
+
 ## Sử dụng
 
 1. Bấm **Mở thư mục**. File có sẵn được hiển thị ngay khi quét, chưa bị thay đổi.
@@ -68,6 +78,14 @@ Nếu muốn giữ nguyên nguồn: chọn **Sao chép sang thư mục khác**, 
 
 Các file đang được chọn có thể nằm ngoài bộ lọc vừa đổi; số lượng/dung lượng đã chọn và toàn bộ đường dẫn sẽ xuất hiện trong bản xem trước. Bấm **Bỏ chọn** để quay về phạm vi bộ lọc. Quét lại làm mất lựa chọn và nhóm tạm trong bộ nhớ; các nhóm được khôi phục từ thư mục `images`, `videos`, `review` hoặc thư mục tên nhãn CLIP.
 
+## Metadata và phát video
+
+Cài FFmpeg để có `ffprobe` trên PATH (Linux: `sudo apt-get install ffmpeg`, macOS: `brew install ffmpeg`; Windows: cài FFmpeg và thêm thư mục `bin` vào PATH). Nếu thiếu, app vẫn đọc thông tin file cơ bản và phát video nếu WebView hỗ trợ; bảng metadata hiển thị cảnh báo thiếu `ffprobe`.
+
+Phát trực tiếp qua asset protocol của Tauri, chỉ cấp quyền cho từng file được mở trong thư mục hiện tại, chặn đường dẫn đi ra ngoài/symlink. Không đưa toàn bộ video vào JSON/base64. Codec phát được phụ thuộc WebView và hệ điều hành; khi không hỗ trợ sẽ có thông báo, không thay đổi file. Tua/phát được kiểm tra với WebM VP8 trong Chromium; chưa kiểm tra mọi codec trên native WebView.
+
+`Send2Trash` nằm trong `backend/requirements.txt`. Sau khi cập nhật, chạy lại `.venv/bin/python -m pip install -r backend/requirements.txt`. Thùng rác có thể không khả dụng trên một số ổ mạng/ổ gắn ngoài; app giữ file và báo lỗi.
+
 ## Kiểm tra và build
 
 ```sh
@@ -79,7 +97,7 @@ cd ..
 npm run tauri build
 ```
 
-Kiểm thử UI qua trình duyệt (một terminal khác đang chạy `npm run dev`):
+Kiểm thử UI qua trình duyệt (cần `ffmpeg` và `ffprobe`, một terminal khác đang chạy `npm run dev`):
 
 ```sh
 .venv/bin/python -m pip install -r backend/requirements-test.txt
@@ -95,20 +113,20 @@ Tauri bundle kèm mã Python, **chưa kèm Python runtime, PyTorch hay model**. 
 
 ## Bảo toàn file và giới hạn
 
-- Mở/quét/phân loại/xem trước không thay đổi file. **Chế độ tại chỗ có di chuyển nguồn**, chỉ sau xác nhận. Chế độ sao chép giữ nguyên nguồn. Chưa có UI hoàn tác tự động.
+- Mở/quét/phân loại/xem trước/đọc metadata không thay đổi file. Xóa chỉ chuyển vào Thùng rác sau xác nhận. **Chế độ tại chỗ có di chuyển nguồn**, chỉ sau xác nhận. Chế độ sao chép giữ nguyên nguồn. Chưa có UI hoàn tác tự động.
 - Chặn đường dẫn thoát khỏi nguồn, bỏ qua symlink trong nguồn, từ chối thư mục nhóm đích là symlink. Kiểm tra kích thước/mtime nguồn và kế hoạch trước khi thực thi. Tránh dùng tiến trình khác sửa cùng thư mục khi đang chạy; đây không phải cơ chế chống thay đổi ác ý đồng thời.
 - Di chuyển tại chỗ dùng hard link không ghi đè rồi mới bỏ đường dẫn cũ; file không bị mất bản duy nhất nếu bước tạo link thất bại. Chỉ hoạt động cùng filesystem hỗ trợ hard link (NTFS/APFS/ext4; FAT/exFAT hoặc thư mục con gắn filesystem khác sẽ báo lỗi và giữ nguồn).
 - Sao chép ghi file tạm, flush/fsync rồi công bố bằng hard link không ghi đè. Đích cũng phải hỗ trợ hard link.
 - Hủy/đóng đột ngột có thể giữ các kết quả đã hoàn tất, để lại file tạm `.image-library-*.partial` hoặc hai đường dẫn đến cùng file nếu bị ngắt giữa bước tạo link và bỏ đường dẫn cũ. Kiểm tra nhật ký `pending`/`linked`/`moved`/`copied` và quét lại trước khi xử lý tiếp. Không tự xóa thư mục rỗng.
 - Không có cơ sở dữ liệu phiên; nhóm chưa áp dụng trên đĩa không tồn tại qua lần khởi động/quét mới. Các vị trí file và nhật ký vẫn tồn tại, nhóm được đọc lại từ tên thư mục chuẩn.
-- Tổng chỉ bao gồm định dạng media hỗ trợ, không tính nhật ký và các file khác. Video nhận diện theo phần mở rộng, chưa có playback/thumbnail hoặc xác minh codec. Hỗ trợ JPG/JPEG/PNG/WEBP/BMP/TIFF; MP4/MOV/MKV/AVI/WEBM/M4V/MPEG/MPG/MTS/M2TS/3GP. Chưa hỗ trợ RAW/HEIC.
+- Tổng chỉ bao gồm định dạng media hỗ trợ, không tính nhật ký và các file khác. Video nhận diện theo phần mở rộng, chưa có thumbnail video hoặc xác minh codec khi quét; phát video tùy khả năng WebView. Hỗ trợ JPG/JPEG/PNG/WEBP/BMP/TIFF; MP4/MOV/MKV/AVI/WEBM/M4V/MPEG/MPG/MTS/M2TS/3GP. Chưa hỗ trợ RAW/HEIC.
 - MVP xử lý CPU từng ảnh, lưu thumbnail trong bộ nhớ; chưa tối ưu cho thư viện rất lớn.
 
 ## Kết quả kiểm chứng trong cloud
 
 - `npm run build`: đạt (TypeScript + Vite).
-- 26 kiểm thử backend: đạt, gồm CLIP nhỏ với trọng số ngẫu nhiên; không tải model pretrained.
-- `tests/ui_smoke.py`: đạt; file ảnh/video được quét, xem trước, sao chép giữ nguồn và di chuyển tại chỗ đúng nhóm; app tự cập nhật sau di chuyển. Đã kiểm tra 4 chế độ xem ở chiều rộng 360–1600 px. IPC và kết quả phân loại được mô phỏng.
+- 32 kiểm thử backend: đạt, gồm CLIP nhỏ với trọng số ngẫu nhiên; không tải model pretrained.
+- `tests/ui_smoke.py`: đạt; file ảnh/video được quét, xem trước, sao chép giữ nguồn và di chuyển tại chỗ đúng nhóm; app tự cập nhật sau di chuyển. Đã kiểm tra 4 chế độ xem ở chiều rộng 360–1600 px; ảnh gốc/phóng to, metadata ảnh, video WebM VP8 phát thật và metadata ffprobe, xóa có xác nhận bằng Send2Trash trong Thùng rác Freedesktop tách riêng (mô phỏng kiểm tra thiết bị để cloud không dùng Thùng rác cá nhân). IPC và kết quả phân loại được mô phỏng.
 - `cargo check --locked` và `cargo build --locked`: đạt trên Linux bằng thư viện hệ thống được giải nén cục bộ trong workspace.
 - Chưa tương tác được cửa sổ Tauri: cloud không có desktop display; chạy binary dừng khi khởi tạo GTK.
 - Chưa chạy inference với trọng số CLIP pretrained: truy cập `huggingface.co` bị proxy từ chối. Đã lưu domain cần thiết trong bản nháp cấu hình môi trường; cần áp dụng cấu hình và tải model trước khi kiểm chứng phần này.
