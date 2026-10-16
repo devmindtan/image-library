@@ -104,7 +104,7 @@ export default function App() {
   const [sort, setSort] = useState("name");
   const [selection, setSelection] = useState<Set<string>>(new Set());
   const [mode, setMode] = useState<Mode>("inplace");
-  const [strategy, setStrategy] = useState<Strategy>("type");
+  const [strategy, setStrategy] = useState<Strategy>("content");
   const [threshold, setThreshold] = useState(0.55);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState(
@@ -609,45 +609,57 @@ export default function App() {
                 ? `Áp dụng cho ${scope.length} file đã chọn.`
                 : `Áp dụng cho ${scope.length} file đang lọc.`}
             </p>
-            {strategy === "content" && (
-              <div className="ai-options">
-                <button
-                  disabled={
-                    busy ||
-                    demo ||
-                    !desktop ||
-                    !scope.some((p) => p.kind === "image")
+            <div className="ai-options">
+              <button
+                disabled={
+                  busy ||
+                  demo ||
+                  !desktop ||
+                  !scope.some((p) => p.kind === "image")
+                }
+                className="primary"
+                onClick={() => {
+                  setStrategy("content");
+                  void run({
+                    operation: "classify",
+                    source,
+                    threshold,
+                    photos: payload(scope.filter((p) => p.kind === "image")),
+                  });
+                }}
+              >
+                Phân loại ảnh bằng AI
+              </button>
+              <label>
+                Ngưỡng cần xem lại{" "}
+                <input
+                  aria-label="Ngưỡng cần xem lại"
+                  type="range"
+                  min="0.2"
+                  max="0.95"
+                  step="0.05"
+                  value={threshold}
+                  disabled={busy}
+                  onChange={(e) => setThreshold(Number(e.target.value))}
+                />
+                {Math.round(threshold * 100)}%
+              </label>
+              <small>
+                Video luôn vào nhóm Video. Điểm AI không phải độ chính xác.
+              </small>
+            </div>
+            {strategy === "content" &&
+              scope.some((p) => p.kind === "image" && !p.category) && (
+                <p>
+                  Ảnh chưa phân loại:{" "}
+                  {
+                    scope.filter((p) => p.kind === "image" && !p.category)
+                      .length
                   }
-                  onClick={() =>
-                    void run({
-                      operation: "classify",
-                      source,
-                      threshold,
-                      photos: payload(scope.filter((p) => p.kind === "image")),
-                    })
-                  }
-                >
-                  Phân loại ảnh bằng AI
-                </button>
-                <label>
-                  Ngưỡng cần xem lại{" "}
-                  <input
-                    aria-label="Ngưỡng cần xem lại"
-                    type="range"
-                    min="0.2"
-                    max="0.95"
-                    step="0.05"
-                    value={threshold}
-                    disabled={busy}
-                    onChange={(e) => setThreshold(Number(e.target.value))}
-                  />
-                  {Math.round(threshold * 100)}%
-                </label>
-                <small>
-                  Video luôn vào nhóm Video. Điểm AI không phải độ chính xác.
-                </small>
-              </div>
-            )}
+                  . Bấm “Phân loại ảnh bằng AI” hoặc chọn nhóm cho từng ảnh
+                  trước khi sắp xếp.
+                </p>
+              )}
           </section>
           <section className="toolbar" aria-label="Chế độ xem">
             <input

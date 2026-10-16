@@ -10,7 +10,7 @@ File `photo_manager.html` là bản prototype cũ, được giữ nguyên.
 - Dung lượng từng file, tổng thư viện, tổng ảnh/video, tổng kết quả đang lọc và tổng các file đã chọn. Dùng kích thước file logic, đơn vị KB/MB/GB tính theo 1024; không phải dung lượng block thực tế trên đĩa.
 - Video được nhận diện theo đuôi file và gán nhóm `videos`; **không giải mã hoặc phân tích nội dung video, không gọi CLIP**. Hiển thị biểu tượng video thay cho thumbnail.
 - Ảnh có thumbnail cục bộ. Ảnh không tạo được thumbnail vẫn xuất hiện và được tính dung lượng, kèm thông báo lỗi.
-- Phân nhóm mặc định **Ảnh / Video** không cần AI hoặc tải mô hình. Tùy chọn phân nhóm nội dung ảnh dùng CLIP zero-shot (`openai/clip-vit-base-patch32`): phong cảnh, chân dung, tài liệu, động vật, phương tiện, ẩm thực, kiến trúc.
+- Mặc định phân nhóm nội dung ảnh bằng **AI**, video luôn vào nhóm Video. Nút **Phân loại ảnh bằng AI** luôn hiển thị; bấm nút cũng chọn lại cách phân nhóm theo nội dung. Tùy chọn **Ảnh / Video** không cần AI hoặc tải mô hình. Phân nhóm nội dung ảnh dùng CLIP zero-shot (`openai/clip-vit-base-patch32`): phong cảnh, chân dung, tài liệu, động vật, phương tiện, ẩm thực, kiến trúc.
 - Điểm thấp hơn ngưỡng vào `review` (Cần xem lại). Điểm softmax tương đối giữa nhãn, **không phải xác suất dự đoán đúng**. Có thể chọn nhóm ảnh thủ công mà không chạy AI.
 - Hai thao tác: **Sắp xếp tại thư mục đang mở** (di chuyển vào thư mục con), hoặc **Sao chép sang thư mục khác** (giữ nguyên nguồn).
 - Luôn tạo bản xem trước đường dẫn trước/sau, số lượng và dung lượng; chỉ thay đổi file sau khi xác nhận. Áp dụng cho các file đã chọn; nếu chưa chọn thì áp dụng cho toàn bộ kết quả đang lọc.
@@ -58,11 +58,11 @@ Chỉ xem giao diện: `npm run dev`. Trình duyệt thông thường không ch�
 
 1. Bấm **Mở thư mục**. File có sẵn được hiển thị ngay khi quét, chưa bị thay đổi.
 2. Chuyển giữa các chế độ xem, mở thư mục con, lọc hoặc chọn riêng những file muốn sắp xếp.
-3. Chọn thao tác **Sắp xếp tại thư mục đang mở**, phân nhóm **Theo loại: Ảnh / Video** để dùng ngay không cần AI.
-4. Bấm **Xem trước sắp xếp**. Ví dụ `kỳ nghỉ/biển.jpg → images/biển.jpg`, `clip.mp4 → videos/clip.mp4` trong thư mục đang mở. File trùng tên được thêm số.
+3. Giữ phân nhóm mặc định **Theo nội dung ảnh + Video**, bấm **Phân loại ảnh bằng AI**, xem kết quả và chỉnh nhóm nếu cần. Video luôn được xếp riêng, không chạy AI.
+4. Chọn thao tác **Sắp xếp tại thư mục đang mở**, bấm **Xem trước sắp xếp**. Ví dụ `kỳ nghỉ/biển.jpg → landscape/biển.jpg`, `clip.mp4 → videos/clip.mp4` trong thư mục đang mở. File trùng tên được thêm số.
 5. Bấm **Xác nhận di chuyển** khi đúng ý. File đổi vị trí, không tạo thêm bản sao. App tự quét lại để hiển thị vị trí mới. Thư mục cũ rỗng được giữ nguyên.
 
-Nếu cần phân loại nội dung ảnh: chọn **Theo nội dung ảnh + Video**, bấm **Phân loại ảnh bằng AI** hoặc chọn nhóm từng ảnh thủ công rồi xem trước. Video luôn vào `videos`. Phân loại chỉ cập nhật nhóm trong bộ nhớ, không tự di chuyển file.
+Nếu chỉ cần tách ảnh/video, chọn **Theo loại: Ảnh / Video** để dùng ngay không tải model. Luồng mặc định vẫn giữ phân loại tự động nội dung ảnh: bấm **Phân loại ảnh bằng AI**, xem kết quả rồi tạo bản xem trước sắp xếp. Nút AI luôn hiển thị kể cả khi chọn phân nhóm chỉ theo loại; bấm nút sẽ quay lại phân nhóm nội dung. Có thể chọn nhóm từng ảnh thủ công. Video luôn vào `videos`. Phân loại chỉ cập nhật nhóm trong bộ nhớ, không tự di chuyển file.
 
 Nếu muốn giữ nguyên nguồn: chọn **Sao chép sang thư mục khác**, chọn thư mục đích riêng, xem trước rồi xác nhận. App giữ đánh dấu file đã sao chép trong phiên hiện tại để không sao chép lại ngoài ý muốn; đổi đích hoặc quét lại để tạo bản sao mới.
 
