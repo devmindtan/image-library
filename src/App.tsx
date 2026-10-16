@@ -1,31 +1,62 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState, useEffect } from "react";
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 
-type Photo = {
+type Media = {
   path: string;
   stamp: string;
   thumbnail: string;
+  kind: "image" | "video";
+  size: number;
+  modified: number;
   category?: string;
   score?: number;
   error?: string;
+  previewError?: string;
   destination?: string;
 };
-type Event = {
+type PlanItem = {
+  path: string;
+  stamp: string;
+  target: string;
+  category: string;
+  kind: string;
+  size: number;
+  action: "skip" | "move" | "copy";
+};
+type Mode = "inplace" | "copy";
+type Strategy = "type" | "content";
+type Request = {
+  operation: string;
+  source: string;
+  destination?: string;
+  mode?: Mode;
+  strategy?: Strategy;
+  threshold?: number;
+  photos?: { path: string; stamp: string; category?: string }[];
+  plan?: PlanItem[];
+};
+type WorkerEvent = {
   type: string;
-  photo?: Photo;
+  photo?: Media;
   path?: string;
+  newPath?: string;
+  stamp?: string;
   category?: string;
   score?: number;
   message?: string;
   current?: number;
   total?: number;
   count?: number;
+  skipped?: number;
   destination?: string;
   journal?: string;
+  plan?: PlanItem[];
 };
+type View = "grid" | "compact" | "list" | "folders";
 const groups: Record<string, string> = {
-  all: "Tất cả ảnh",
+  images: "Ảnh",
+  videos: "Video",
   landscape: "Phong cảnh",
   portrait: "Chân dung",
   document: "Tài liệu",
@@ -35,66 +66,158 @@ const groups: Record<string, string> = {
   architecture: "Kiến trúc",
   review: "Cần xem lại",
 };
-const symbols: Record<string, string> = {
-  all: "▦",
-  landscape: "◒",
-  portrait: "♙",
-  document: "▤",
-  animals: "♧",
-  vehicles: "▱",
-  food: "◉",
-  architecture: "⌂",
-  review: "◇",
-};
 const desktop = isTauri();
+const normalize = (path: string) => path.replaceAll("\\", "/");
+const fileName = (path: string) => normalize(path).split("/").pop() || path;
+const parent = (path: string) =>
+  normalize(path).split("/").slice(0, -1).join("/");
+export function formatBytes(bytes: number) {
+  if (!bytes) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+    units.length - 1,
+  );
+  return `${new Intl.NumberFormat("vi-VN", { maximumFractionDigits: i ? 1 : 0 }).format(bytes / 1024 ** i)} ${units[i]}`;
+}
+const bytesOf = (items: Media[]) => items.reduce((n, p) => n + p.size, 0);
+function initialView(): View {
+  try {
+    const v = localStorage.getItem("library-view");
+    return ["grid", "compact", "list", "folders"].includes(v || "")
+      ? (v as View)
+      : "grid";
+  } catch {
+    return "grid";
+  }
+}
 
 export default function App() {
   const [source, setSource] = useState("");
   const [destination, setDestination] = useState("");
-  const [photos, setPhotos] = useState<Photo[]>([]);
-  const [group, setGroup] = useState("all");
+  const [items, setItems] = useState<Media[]>([]);
+  const [kind, setKind] = useState("all");
+  const [category, setCategory] = useState("all");
+  const [folder, setFolder] = useState("");
   const [query, setQuery] = useState("");
+  const [view, setView] = useState<View>(initialView);
+  const [sort, setSort] = useState("name");
+  const [selection, setSelection] = useState<Set<string>>(new Set());
+  const [mode, setMode] = useState<Mode>("inplace");
+  const [strategy, setStrategy] = useState<Strategy>("type");
   const [threshold, setThreshold] = useState(0.55);
   const [busy, setBusy] = useState(false);
-  const [stage, setStage] = useState("");
-  const [message, setMessage] = useState("Chọn thư mục để bắt đầu");
+  const [message, setMessage] = useState(
+    "Mở một thư mục để hiển thị ảnh và video.",
+  );
   const [progress, setProgress] = useState(0);
   const [warnings, setWarnings] = useState<string[]>([]);
-  const [confirm, setConfirm] = useState(false);
   const [demo, setDemo] = useState(false);
+  const [preview, setPreview] = useState<{
+    request: Request;
+    plan: PlanItem[];
+  } | null>(null);
   const active = useRef<string | null>(null);
-  const classified = photos.filter((p) => p.category && !p.error);
-  const copied = photos.filter((p) => p.destination).length;
-  const visible = photos.filter(
-    (p) =>
-      (group === "all" || p.category === group) &&
-      p.path.toLocaleLowerCase().includes(query.toLocaleLowerCase()),
-  );
-  const notify = (text: string) => setWarnings((w) => [...w, text]);
-  async function run(operation: string, root = source) {
-    if (!desktop) {
-      setMessage("Mở bản desktop để truy cập thư mục trên máy.");
-      return;
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    try {
+      localStorage.setItem("library-view", view);
+    } catch {
+      /* Read-only browser storage does not block the library. */
     }
-    const jobId = crypto.randomUUID();
-    active.current = jobId;
+  }, [view]);
+  useEffect(() => {
+    if (preview && !dialog.current?.open) dialog.current?.showModal();
+    else if (!preview && dialog.current?.open) dialog.current.close();
+  }, [preview]);
+  const filtered = useMemo(
+    () =>
+      items
+        .filter(
+          (p) =>
+            (kind === "all" || p.kind === kind) &&
+            (category === "all" || p.category === category) &&
+            (!folder || normalize(p.path).startsWith(folder + "/")) &&
+            p.path.toLocaleLowerCase().includes(query.toLocaleLowerCase()),
+        )
+        .sort((a, b) =>
+          sort === "size-desc"
+            ? b.size - a.size
+            : sort === "size-asc"
+              ? a.size - b.size
+              : sort === "newest"
+                ? b.modified - a.modified
+                : a.path.localeCompare(b.path, "vi", { numeric: true }),
+        ),
+    [items, kind, category, folder, query, sort],
+  );
+  const folderEntries = useMemo(() => {
+    const result = new Map<string, Media[]>();
+    for (const item of filtered) {
+      const rest = normalize(item.path).slice(folder ? folder.length + 1 : 0);
+      if (!rest.includes("/")) continue;
+      const key = (folder ? folder + "/" : "") + rest.split("/")[0];
+      result.set(key, [...(result.get(key) || []), item]);
+    }
+    return [...result.entries()].sort(([a], [b]) => a.localeCompare(b, "vi"));
+  }, [filtered, folder]);
+  const shown =
+    view === "folders"
+      ? filtered.filter((p) => parent(p.path) === folder)
+      : filtered;
+  const selectedItems = items.filter((p) => selection.has(p.path));
+  const scope = selection.size ? selectedItems : filtered;
+  const images = items.filter((p) => p.kind === "image");
+  const videos = items.filter((p) => p.kind === "video");
+  const notify = (text: string) => setWarnings((w) => [...w, text]);
+  const payload = (list: Media[]) =>
+    list.map(({ path, stamp, category }) => ({ path, stamp, category }));
+  function toggle(path: string) {
+    setSelection((old) => {
+      const next = new Set(old);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }
+  async function run(request: Request): Promise<boolean> {
+    if (!desktop) {
+      setMessage("Mở ứng dụng desktop để làm việc với file trên máy.");
+      return false;
+    }
+    if (active.current) return false;
+    const id = crypto.randomUUID();
+    active.current = id;
     setBusy(true);
-    setStage(operation);
     setProgress(0);
     setWarnings([]);
+    const taskWarnings: string[] = [];
+    const report = (text: string) => {
+      taskWarnings.push(text);
+      notify(text);
+    };
+    let success = true;
+    let resultMessage =
+      "Tác vụ đã dừng. Kiểm tra nhật ký nếu đã thay đổi file.";
     setMessage(
-      operation === "scan"
-        ? "Đang đọc ảnh…"
-        : operation === "classify"
-          ? "Đang chuẩn bị CLIP…"
-          : "Đang sao chép…",
+      request.operation === "scan"
+        ? "Đang quét thư mục…"
+        : request.operation === "plan"
+          ? "Đang kiểm tra và tạo bản xem trước…"
+          : request.operation === "classify"
+            ? "Đang phân loại ảnh bằng CLIP…"
+            : "Đang sắp xếp file…",
     );
-    const onEvent = new Channel<Event>();
+    if (request.operation === "scan") {
+      setItems([]);
+      setSelection(new Set());
+    }
+    const onEvent = new Channel<WorkerEvent>();
     onEvent.onmessage = (e) => {
-      if (active.current !== jobId) return;
-      if (e.type === "photo" && e.photo) setPhotos((p) => [...p, e.photo!]);
+      if (active.current !== id) return;
+      if (e.type === "photo" && e.photo) setItems((p) => [...p, e.photo!]);
       if (e.type === "classified")
-        setPhotos((p) =>
+        setItems((p) =>
           p.map((x) =>
             x.path === e.path
               ? { ...x, category: e.category, score: e.score, error: undefined }
@@ -102,77 +225,94 @@ export default function App() {
           ),
         );
       if (e.type === "copied")
-        setPhotos((p) =>
+        setItems((p) =>
           p.map((x) =>
-            x.path === e.path ? { ...x, destination: e.destination } : x,
+            x.path === e.path
+              ? { ...x, destination: e.destination, error: undefined }
+              : x,
           ),
         );
+      if (e.type === "moved")
+        setItems((p) =>
+          p.map((x) =>
+            x.path === e.path
+              ? {
+                  ...x,
+                  path: e.newPath!,
+                  category: e.category,
+                  stamp: e.stamp!,
+                  error: undefined,
+                }
+              : x,
+          ),
+        );
+      if (e.type === "plan" && e.plan) setPreview({ request, plan: e.plan });
+      if (e.type === "warning") report(e.message || "Không đọc được file");
       if (e.type === "photo_error") {
-        notify(`${e.path}: ${e.message}`);
-        setPhotos((p) =>
+        report(`${e.path}: ${e.message}`);
+        setItems((p) =>
           p.map((x) => (x.path === e.path ? { ...x, error: e.message } : x)),
         );
       }
-      if (e.type === "warning") notify(e.message || "Không đọc được ảnh");
       if (e.type === "status") setMessage(e.message || "");
       if (e.type === "progress")
         setProgress(Math.round(((e.current || 0) / (e.total || 1)) * 100));
       if (e.type === "error") {
-        notify(e.message || "Có lỗi");
-        setMessage("Không hoàn tất tác vụ");
+        success = false;
+        report(e.message || "Có lỗi");
+        resultMessage = "Không hoàn tất tác vụ.";
+        setMessage(resultMessage);
       }
       if (e.type === "done") {
         setProgress(100);
-        setMessage(
-          operation === "scan"
-            ? `Đã đọc ${e.count} ảnh`
-            : operation === "classify"
-              ? "Đã xử lý xong. Xem lại nhóm và các lỗi trước khi sao chép."
-              : `Đã sao chép ${e.count} ảnh. Nhật ký: ${e.journal}`,
-        );
+        resultMessage =
+          request.operation === "scan"
+            ? `Đã hiển thị ${e.count} file. Chưa thay đổi file nào.`
+            : request.operation === "classify"
+              ? "Đã xử lý phân loại. Bạn có thể chỉnh nhóm từng ảnh."
+              : request.operation === "plan"
+                ? "Kiểm tra đường dẫn trước khi xác nhận."
+                : `Đã ${request.mode === "inplace" ? "di chuyển" : "sao chép"} ${e.count} file, giữ nguyên ${e.skipped || 0} file đúng vị trí. Nhật ký: ${e.journal}`;
+        setMessage(resultMessage);
       }
     };
     try {
-      await invoke("run_worker", {
-        jobId,
-        onEvent,
-        request: {
-          operation,
-          source: root,
-          destination,
-          threshold,
-          photos: (operation === "copy"
-            ? classified.filter((p) => !p.destination)
-            : operation === "classify"
-              ? photos.filter((p) => !p.destination)
-              : photos
-          ).map(({ path, stamp, category }) => ({ path, stamp, category })),
-        },
-      });
+      await invoke("run_worker", { jobId: id, onEvent, request });
     } catch (error) {
-      notify(String(error));
-      setMessage("Tác vụ đã dừng. Kết quả đã hoàn tất vẫn được giữ lại.");
+      success = false;
+      report(String(error));
+      setMessage(resultMessage);
     } finally {
-      if (active.current === jobId) {
+      if (active.current === id) {
         active.current = null;
         setBusy(false);
-        setStage("");
       }
     }
+    // Re-read the real tree even after cancellation, including a possible linked duplicate.
+    if (request.operation === "apply" && request.mode === "inplace") {
+      setFolder("");
+      setSelection(new Set());
+      await run({ operation: "scan", source: request.source });
+      setWarnings((current) => [...taskWarnings, ...current]);
+      setMessage(resultMessage + " Đã quét lại thư mục.");
+    }
+    return success;
   }
   async function chooseSource() {
     try {
       const selected = await open({
         directory: true,
         multiple: false,
-        title: "Chọn thư mục ảnh gốc",
+        title: "Mở thư mục ảnh và video",
       });
       if (typeof selected === "string") {
         setSource(selected);
-        setPhotos([]);
-        setGroup("all");
         setDemo(false);
-        await run("scan", selected);
+        setFolder("");
+        setKind("all");
+        setCategory("all");
+        setQuery("");
+        await run({ operation: "scan", source: selected });
       }
     } catch (error) {
       notify(String(error));
@@ -187,7 +327,7 @@ export default function App() {
       });
       if (typeof selected === "string" && selected !== destination) {
         setDestination(selected);
-        setPhotos((p) => p.map((x) => ({ ...x, destination: undefined })));
+        setItems((p) => p.map((x) => ({ ...x, destination: undefined })));
       }
     } catch (error) {
       notify(String(error));
@@ -201,251 +341,388 @@ export default function App() {
         notify(String(error));
       }
   }
+  async function makePreview() {
+    const list = scope.filter((p) => mode !== "copy" || !p.destination);
+    if (!list.length) {
+      setMessage("Không có file cần sắp xếp trong phạm vi này.");
+      return;
+    }
+    await run({
+      operation: "plan",
+      source,
+      destination,
+      mode,
+      strategy,
+      photos: payload(list),
+    });
+  }
   function showDemo() {
-    const examples = [
-      ["landscape", "Đồi xanh buổi sáng", "#a0b7a1", "#e6d5ac"],
-      ["portrait", "Một ngày bình yên", "#c59f8a", "#e4c9b8"],
-      ["architecture", "Góc phố quen", "#a5b2bc", "#e1d2b8"],
-      ["food", "Bữa sáng cuối tuần", "#b58a61", "#dfc5a1"],
-      ["review", "Khoảnh khắc 05", "#a1a0b6", "#d6c8c4"],
-      ["landscape", "Bên bờ biển", "#8eaeb8", "#e5d7b6"],
+    const data: [string, Media["kind"], string, number, string][] = [
+      ["Kỳ nghỉ/biển.jpg", "image", "landscape", 2453120, "#bad0d6"],
+      ["Gia đình/chân dung.jpg", "image", "portrait", 1835008, "#e2c6b2"],
+      ["Kỳ nghỉ/chuyến đi.mp4", "video", "videos", 146800640, ""],
+      ["Tài liệu/hóa đơn.png", "image", "document", 563200, "#d9ded4"],
+      ["clip.mov", "video", "videos", 73400320, ""],
+      ["khu vườn.jpg", "image", "landscape", 3145728, "#aec4a1"],
     ];
     setDemo(true);
+    setSource("Thư viện minh họa");
+    setFolder("");
+    setKind("all");
+    setCategory("all");
+    setQuery("");
+    setSelection(new Set());
     setWarnings([]);
-    setGroup("all");
-    setPhotos(
-      examples.map(([category, title, a, b], i) => ({
-        path: `${title}.jpg`,
-        stamp: "demo",
+    setItems(
+      data.map(([path, kind, category, size, color], i) => ({
+        path,
+        kind,
         category,
-        score: category === "review" ? 0.38 : 0.81 + i * 0.02,
-        thumbnail: `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="600" height="420"><defs><linearGradient id="g" x2=".8" y2="1"><stop stop-color="${b}"/><stop offset="1" stop-color="${a}"/></linearGradient></defs><rect width="600" height="420" fill="url(#g)"/><circle cx="450" cy="100" r="42" fill="#fff" opacity=".45"/><path d="M0 330L180 160L350 340L470 225L600 310V420H0Z" fill="${a}"/><path d="M0 385L260 255L490 420H0Z" fill="#233f38" opacity=".18"/></svg>`)}`,
+        size,
+        stamp: "demo",
+        modified: 1700000000 + i,
+        score: kind === "image" ? 0.8 : undefined,
+        thumbnail:
+          kind === "image"
+            ? `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="320" height="220"><rect width="320" height="220" fill="${color}"/><path d="M0 220L110 70L210 170L260 110L320 170V220Z" fill="#657c6e" opacity=".4"/></svg>`)}`
+            : "",
       })),
     );
-    setMessage(
-      "Dữ liệu minh họa giao diện — chưa chạy AI, không truy cập file trên máy.",
-    );
+    setMessage("Dữ liệu minh họa. Chưa truy cập hoặc thay đổi file thật.");
   }
-  return (
-    <div className="shell">
-      <aside className="sidebar">
-        <a className="brand" href="#">
-          <span className="brand-icon">▧</span>
-          <span>
-            image library<small>KHÔNG GIAN ẢNH CỦA BẠN</small>
-          </span>
-        </a>
-        <div className="workspace-label">THƯ VIỆN</div>
-        <nav aria-label="Nhóm ảnh">
-          {Object.entries(groups).map(([key, label]) => (
-            <button
-              key={key}
-              className={`nav-item ${group === key ? "selected" : ""}`}
-              onClick={() => setGroup(key)}
-            >
-              <span className="nav-symbol">{symbols[key]}</span>
+  function filterKind(value: string) {
+    setKind(value);
+    setCategory("all");
+    setSelection(new Set());
+  }
+  const mediaPreview = (item: Media) =>
+    item.thumbnail ? (
+      <img src={item.thumbnail} alt="" loading="lazy" />
+    ) : (
+      <div className={`file-placeholder ${item.kind}`}>
+        <span>{item.kind === "video" ? "▶" : "▧"}</span>
+        <small>{fileName(item.path).split(".").pop()?.toUpperCase()}</small>
+      </div>
+    );
+  const categorySelect = (item: Media) =>
+    item.kind === "video" ? (
+      <span className="tag">Video</span>
+    ) : (
+      <select
+        aria-label={`Nhóm của ${item.path}`}
+        value={item.category || ""}
+        disabled={busy || demo}
+        onChange={(e) =>
+          setItems((p) =>
+            p.map((x) =>
+              x.path === item.path
+                ? {
+                    ...x,
+                    category: e.target.value || undefined,
+                    score: undefined,
+                    error: undefined,
+                  }
+                : x,
+            ),
+          )
+        }
+      >
+        <option value="">Chưa phân loại</option>
+        {Object.entries(groups)
+          .filter(([key]) => key !== "videos")
+          .map(([key, label]) => (
+            <option key={key} value={key}>
               {label}
-              <span className="count">
-                {key === "all"
-                  ? photos.length
-                  : photos.filter((p) => p.category === key).length}
-              </span>
-            </button>
+            </option>
           ))}
-        </nav>
-        <div className="privacy">
-          <span>◈</span>
-          <strong>Ảnh ở lại trên máy bạn</strong>
-          <p>
-            CLIP xử lý cục bộ. Không gửi ảnh đến dịch vụ AI. Lần đầu cần tải mô
-            hình.
-          </p>
+      </select>
+    );
+  return (
+    <div className="app-shell">
+      <header className="app-header">
+        <a className="brand" href="#" aria-label="Thư viện ảnh và video">
+          Thư viện <span>Ảnh & Video</span>
+        </a>
+        <div className="header-actions">
+          {!desktop && (
+            <button onClick={showDemo} disabled={busy}>
+              Xem minh họa
+            </button>
+          )}
+          <button
+            className="primary"
+            onClick={chooseSource}
+            disabled={busy || !desktop}
+          >
+            Mở thư mục
+          </button>
         </div>
-        <div className="sidebar-footer">
-          <span className="status-dot" />
-          {desktop ? "Ứng dụng desktop" : "Bản xem giao diện"}
-          <span className="version">v0.1</span>
-        </div>
-      </aside>
-      <main>
-        <header>
-          <div className="breadcrumb">
-            Không gian cá nhân <span>/</span> Thư viện ảnh
+      </header>
+      <div className="workspace">
+        <aside className="sidebar" aria-label="Bộ lọc thư viện">
+          <h2>Thư viện</h2>
+          <nav>
+            {[
+              ["all", "Tất cả", items],
+              ["image", "Ảnh", images],
+              ["video", "Video", videos],
+            ].map(([key, label, list]) => (
+              <button
+                key={key as string}
+                aria-pressed={kind === key && category === "all"}
+                onClick={() => filterKind(key as string)}
+              >
+                <span>{label as string}</span>
+                <span className="filter-stats">
+                  {(list as Media[]).length}
+                  <small>{formatBytes(bytesOf(list as Media[]))}</small>
+                </span>
+              </button>
+            ))}
+          </nav>
+          <details className="category-filters">
+            <summary>Nhóm nội dung ảnh</summary>
+            {Object.entries(groups)
+              .filter(([key]) => !["images", "videos"].includes(key))
+              .map(([key, label]) => {
+                const list = images.filter((p) => p.category === key);
+                return (
+                  <button
+                    key={key}
+                    aria-pressed={category === key}
+                    onClick={() => {
+                      setKind("image");
+                      setCategory(key);
+                      setSelection(new Set());
+                    }}
+                  >
+                    <span>{label}</span>
+                    <span>{list.length}</span>
+                  </button>
+                );
+              })}
+          </details>
+          <div className="storage-summary">
+            <strong>{formatBytes(bytesOf(items))}</strong>
+            <span>Tổng dung lượng file</span>
+            <small>Chỉ đọc khi mở thư mục. Thay đổi file cần xác nhận.</small>
           </div>
-          <span className="local-badge">◉ LOCAL FIRST</span>
-        </header>
-        <section className="content">
-          <div className="page-heading">
+        </aside>
+        <main>
+          <section className="library-heading">
             <div>
-              <div className="eyebrow">SẮP XẾP ÍT HƠN. KHÁM PHÁ NHIỀU HƠN.</div>
-              <h1>
-                Những khoảnh khắc,
-                <br />
-                <em>đúng nơi thuộc về.</em>
-              </h1>
-              <p>
-                Để AI giúp bạn sắp xếp thư viện. Bạn quyết định điều gì được
-                lưu.
+              <h1>{source ? fileName(source) : "Ảnh và video của bạn"}</h1>
+              <p className="source-path" title={source}>
+                {source ||
+                  "Mở thư mục hiện có để xem trực tiếp, không cần sao chép."}
               </p>
             </div>
-            <div className="heading-mark" aria-hidden="true">
-              ▧<span>✦</span>
-            </div>
-          </div>
+            <button
+              disabled={busy || !source || demo}
+              onClick={() => void run({ operation: "scan", source })}
+            >
+              Quét lại
+            </button>
+          </section>
           {!desktop && (
-            <div className="browser-note">
-              <div>
-                <strong>Đây là giao diện web của ứng dụng desktop.</strong>
-                <p>Chọn thư mục và chạy AI cần bản Tauri trên máy của bạn.</p>
-              </div>
-              <button className="secondary" onClick={showDemo}>
-                Xem dữ liệu minh họa ↗
-              </button>
-            </div>
+            <p className="browser-note">
+              Bản xem trên trình duyệt. Mở ứng dụng Tauri để đọc và sắp xếp file
+              trên máy.
+            </p>
           )}
-          <section className="workflow" aria-label="Quy trình phân loại">
-            <div className="step">
-              <span className="step-number">01</span>
-              <div>
-                <h3>Thư mục nguồn</h3>
-                <p title={source}>
-                  {source || "Nơi chứa những bức ảnh của bạn"}
-                </p>
-                <button
-                  disabled={busy || !desktop}
-                  onClick={chooseSource}
-                  className="text-button"
-                >
-                  {source ? "Đổi thư mục" : "Chọn thư mục"} <span>↗</span>
-                </button>
-              </div>
+          <section className="summary" aria-label="Dung lượng thư viện">
+            <div>
+              <span>Tổng</span>
+              <strong>
+                {items.length} file · {formatBytes(bytesOf(items))}
+              </strong>
             </div>
-            <div className="step">
-              <span className="step-number">02</span>
-              <div>
-                <h3>Phân loại bằng AI</h3>
-                <p>CLIP · 7 nhóm nội dung</p>
-                <button
-                  disabled={
-                    busy ||
-                    !photos.length ||
-                    demo ||
-                    !desktop ||
-                    photos.every((p) => !!p.destination)
-                  }
-                  className="text-button"
-                  onClick={() => {
-                    setPhotos((p) =>
-                      p.map((x) =>
-                        x.destination
-                          ? x
-                          : {
-                              ...x,
-                              category: undefined,
-                              score: undefined,
-                              error: undefined,
-                            },
-                      ),
-                    );
-                    void run("classify");
-                  }}
-                >
-                  Phân loại ảnh <span>✦</span>
-                </button>
-              </div>
+            <div>
+              <span>Ảnh</span>
+              <strong>
+                {images.length} · {formatBytes(bytesOf(images))}
+              </strong>
             </div>
-            <div className="step">
-              <span className="step-number">03</span>
-              <div>
-                <h3>Lưu bản sao đã sắp xếp</h3>
-                <p title={destination}>
-                  {destination || "Ảnh gốc luôn được giữ nguyên"}
-                </p>
-                <button
-                  disabled={busy || !desktop}
-                  className="text-button"
-                  onClick={chooseDestination}
-                >
-                  {destination ? "Đổi thư mục đích" : "Chọn nơi lưu"}{" "}
-                  <span>↗</span>
-                </button>
-              </div>
+            <div>
+              <span>Video</span>
+              <strong>
+                {videos.length} · {formatBytes(bytesOf(videos))}
+              </strong>
             </div>
           </section>
-          <div className="settings">
-            <label>
-              Ngưỡng cần xem lại{" "}
-              <input
-                type="range"
-                min="0.2"
-                max="0.95"
-                step="0.05"
-                value={threshold}
-                disabled={busy}
-                onChange={(e) => setThreshold(Number(e.target.value))}
-              />
-              <strong>{Math.round(threshold * 100)}%</strong>
-            </label>
-            <span>
-              Điểm CLIP tương đối giữa các nhóm, không phải độ chính xác.
-            </span>
-          </div>
-          <div className="gallery-toolbar">
-            <div>
-              <h2>
-                {groups[group]} <span>{visible.length}</span>
-              </h2>
-              <p>
-                {demo
-                  ? "Ảnh minh họa · kết quả giả lập"
-                  : `${classified.length} ảnh đã phân loại · ${copied} ảnh đã sao chép`}
-              </p>
-            </div>
-            <div className="gallery-actions">
-              <label className="search">
-                <span>⌕</span>
-                <input
-                  aria-label="Tìm ảnh"
-                  placeholder="Tìm theo tên ảnh…"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                />
+          <section className="organizer" aria-label="Sắp xếp thư mục">
+            <div className="organizer-options">
+              <label>
+                Thao tác
+                <select
+                  aria-label="Thao tác sắp xếp"
+                  value={mode}
+                  disabled={busy}
+                  onChange={(e) => setMode(e.target.value as Mode)}
+                >
+                  <option value="inplace">Sắp xếp tại thư mục đang mở</option>
+                  <option value="copy">Sao chép sang thư mục khác</option>
+                </select>
               </label>
+              <label>
+                Phân nhóm
+                <select
+                  aria-label="Cách phân nhóm"
+                  value={strategy}
+                  disabled={busy}
+                  onChange={(e) => setStrategy(e.target.value as Strategy)}
+                >
+                  <option value="type">Theo loại: Ảnh / Video</option>
+                  <option value="content">Theo nội dung ảnh + Video</option>
+                </select>
+              </label>
+              {mode === "copy" && (
+                <button
+                  title={destination}
+                  disabled={busy || !desktop || demo}
+                  onClick={chooseDestination}
+                >
+                  {destination
+                    ? `Nơi lưu: ${fileName(destination)}`
+                    : "Chọn nơi lưu"}
+                </button>
+              )}
               <button
                 className="primary"
                 disabled={
                   busy ||
-                  !destination ||
-                  !classified.some((p) => !p.destination) ||
+                  !scope.length ||
+                  !desktop ||
                   demo ||
-                  !desktop
+                  (mode === "copy" && !destination)
                 }
-                onClick={() => setConfirm(true)}
+                onClick={makePreview}
               >
-                Sao chép theo nhóm ↗
+                Xem trước sắp xếp
               </button>
             </div>
+            <p>
+              {mode === "inplace"
+                ? "Di chuyển vào thư mục con của thư mục đang mở. Không nhân đôi file."
+                : "Tạo bản sao trong thư mục đích và giữ nguyên nguồn."}{" "}
+              {selection.size
+                ? `Áp dụng cho ${scope.length} file đã chọn.`
+                : `Áp dụng cho ${scope.length} file đang lọc.`}
+            </p>
+            {strategy === "content" && (
+              <div className="ai-options">
+                <button
+                  disabled={
+                    busy ||
+                    demo ||
+                    !desktop ||
+                    !scope.some((p) => p.kind === "image")
+                  }
+                  onClick={() =>
+                    void run({
+                      operation: "classify",
+                      source,
+                      threshold,
+                      photos: payload(scope.filter((p) => p.kind === "image")),
+                    })
+                  }
+                >
+                  Phân loại ảnh bằng AI
+                </button>
+                <label>
+                  Ngưỡng cần xem lại{" "}
+                  <input
+                    aria-label="Ngưỡng cần xem lại"
+                    type="range"
+                    min="0.2"
+                    max="0.95"
+                    step="0.05"
+                    value={threshold}
+                    disabled={busy}
+                    onChange={(e) => setThreshold(Number(e.target.value))}
+                  />
+                  {Math.round(threshold * 100)}%
+                </label>
+                <small>
+                  Video luôn vào nhóm Video. Điểm AI không phải độ chính xác.
+                </small>
+              </div>
+            )}
+          </section>
+          <section className="toolbar" aria-label="Chế độ xem">
+            <input
+              type="search"
+              aria-label="Tìm file"
+              placeholder="Tìm tên hoặc đường dẫn…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            <select
+              aria-label="Sắp xếp hiển thị"
+              value={sort}
+              onChange={(e) => setSort(e.target.value)}
+            >
+              <option value="name">Tên A → Z</option>
+              <option value="size-desc">Dung lượng giảm dần</option>
+              <option value="size-asc">Dung lượng tăng dần</option>
+              <option value="newest">Mới nhất</option>
+            </select>
+            <div className="view-switch" role="group" aria-label="Chế độ xem">
+              {(
+                [
+                  ["grid", "Lưới"],
+                  ["compact", "Gọn"],
+                  ["list", "Danh sách"],
+                  ["folders", "Thư mục"],
+                ] as [View, string][]
+              ).map(([key, label]) => (
+                <button
+                  key={key}
+                  aria-pressed={view === key}
+                  onClick={() => setView(key)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </section>
+          <div className="library-meta">
+            <div className="breadcrumbs" aria-label="Đường dẫn thư mục">
+              <button onClick={() => setFolder("")}>Thư mục gốc</button>
+              {folder
+                .split("/")
+                .filter(Boolean)
+                .map((part, index) => (
+                  <span key={index}>
+                    {" "}
+                    /{" "}
+                    <button
+                      onClick={() =>
+                        setFolder(
+                          folder
+                            .split("/")
+                            .slice(0, index + 1)
+                            .join("/"),
+                        )
+                      }
+                    >
+                      {part}
+                    </button>
+                  </span>
+                ))}
+            </div>
+            <span>
+              {filtered.length} file · {formatBytes(bytesOf(filtered))}
+              {selection.size > 0 &&
+                ` | Đã chọn ${selection.size} · ${formatBytes(bytesOf(selectedItems))}`}
+            </span>
           </div>
           <div className="activity" role="status">
-            <span className={`status-dot ${busy ? "working" : ""}`} />
             <span>{message}</span>
-            {busy && (
-              <button className="text-button" onClick={cancel}>
-                Hủy tác vụ
-              </button>
-            )}
+            {busy && <button onClick={cancel}>Hủy tác vụ</button>}
           </div>
           {busy && (
-            <div
-              className="progress"
-              role="progressbar"
-              aria-label={stage}
-              aria-valuenow={progress}
-              aria-valuemin={0}
-              aria-valuemax={100}
-            >
-              <div style={{ width: `${progress || 3}%` }} />
-            </div>
+            <progress aria-label="Tiến trình" max="100" value={progress || 2} />
           )}
           {warnings.length > 0 && (
             <details className="warnings" open>
@@ -457,139 +734,289 @@ export default function App() {
               </ul>
             </details>
           )}
-          {visible.length ? (
-            <div className="photo-grid">
-              {visible.map((photo) => (
-                <article className="photo-card" key={photo.path}>
-                  <div className="photo-image">
-                    <img
-                      src={photo.thumbnail}
-                      alt={photo.path}
-                      loading="lazy"
-                    />
-                    {photo.destination && (
-                      <span className="copied-badge">✓ Đã sao chép</span>
-                    )}
-                  </div>
-                  <div className="photo-info">
-                    <h3 title={photo.path}>
-                      {photo.path.split(/[\\/]/).pop()}
-                    </h3>
-                    <div className="photo-meta">
-                      <span
-                        className={photo.category === "review" ? "review" : ""}
-                      >
-                        {photo.error
-                          ? "⚠ Lỗi xử lý"
-                          : photo.category
-                            ? groups[photo.category]
-                            : "Chưa phân loại"}
-                      </span>
-                      {photo.score !== undefined && (
-                        <span>{Math.round(photo.score * 100)}%</span>
-                      )}
-                    </div>
-                    {photo.category && !demo && (
-                      <select
-                        aria-label={`Nhóm của ${photo.path}`}
-                        value={photo.category}
-                        disabled={busy || !!photo.destination}
-                        onChange={(e) =>
-                          setPhotos((p) =>
-                            p.map((x) =>
-                              x.path === photo.path
-                                ? { ...x, category: e.target.value }
-                                : x,
-                            ),
-                          )
-                        }
-                      >
-                        {Object.entries(groups)
-                          .filter(([key]) => key !== "all")
-                          .map(([key, label]) => (
-                            <option key={key} value={key}>
-                              {label}
-                            </option>
-                          ))}
-                      </select>
-                    )}
-                    {photo.error && (
-                      <p className="photo-error">{photo.error}</p>
-                    )}
-                  </div>
-                </article>
-              ))}
-            </div>
-          ) : (
-            <div className="empty">
-              <div className="empty-icon">
-                ▧<span>+</span>
-              </div>
-              <h2>
-                {photos.length
-                  ? "Không tìm thấy ảnh phù hợp"
-                  : "Một thư viện ngăn nắp bắt đầu từ đây"}
-              </h2>
-              <p>
-                {photos.length
-                  ? "Thử tên khác hoặc chọn nhóm ảnh khác."
-                  : "Chọn thư mục ảnh. Xem trước cách AI phân loại, rồi lưu bản sao vào từng nhóm."}
-              </p>
-              {!photos.length && (
-                <button
-                  className="primary"
-                  disabled={busy || !desktop}
-                  onClick={chooseSource}
-                >
-                  ＋ Chọn thư mục ảnh
+          {filtered.length > 0 && (
+            <div className="selection-bar">
+              <label>
+                <input
+                  type="checkbox"
+                  aria-label="Chọn tất cả file đang lọc"
+                  disabled={busy}
+                  checked={
+                    filtered.length > 0 &&
+                    filtered.every((p) => selection.has(p.path))
+                  }
+                  onChange={(e) =>
+                    setSelection(
+                      e.target.checked
+                        ? new Set(filtered.map((p) => p.path))
+                        : new Set(),
+                    )
+                  }
+                />{" "}
+                Chọn tất cả file đang lọc
+              </label>
+              {selection.size > 0 && (
+                <button onClick={() => setSelection(new Set())} disabled={busy}>
+                  Bỏ chọn
                 </button>
               )}
-              <small>JPG, PNG, WEBP, BMP, TIFF · Bao gồm thư mục con</small>
+              <span>
+                {view === "folders"
+                  ? "Thư mục con và file trực tiếp bên dưới"
+                  : "Xem file, chỉnh nhóm rồi tạo bản xem trước."}
+              </span>
             </div>
           )}
+          {view === "folders" && folderEntries.length > 0 && (
+            <div className="folder-grid">
+              {folderEntries.map(([path, list]) => (
+                <button
+                  className="folder-card"
+                  key={path}
+                  onClick={() => {
+                    setFolder(path);
+                    setSelection(new Set());
+                  }}
+                >
+                  <span className="folder-icon" aria-hidden="true">
+                    ▱
+                  </span>
+                  <strong>{fileName(path)}</strong>
+                  <small>
+                    {list.length} file · {formatBytes(bytesOf(list))}
+                  </small>
+                </button>
+              ))}
+            </div>
+          )}
+          {shown.length > 0 ? (
+            view === "list" || view === "folders" ? (
+              <div className="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>
+                        <span className="sr-only">Chọn</span>
+                      </th>
+                      <th>Tên file</th>
+                      <th>Loại</th>
+                      <th>Dung lượng</th>
+                      <th>Nhóm</th>
+                      <th>Thư mục</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {shown.map((item) => (
+                      <tr key={item.path}>
+                        <td>
+                          <input
+                            aria-label={`Chọn ${item.path}`}
+                            type="checkbox"
+                            disabled={busy}
+                            checked={selection.has(item.path)}
+                            onChange={() => toggle(item.path)}
+                          />
+                        </td>
+                        <td>
+                          <div className="table-file">
+                            <div className="table-preview">
+                              {mediaPreview(item)}
+                            </div>
+                            <div>
+                              <strong title={item.path}>
+                                {fileName(item.path)}
+                              </strong>
+                              {item.previewError && (
+                                <small>Không có ảnh xem trước</small>
+                              )}
+                              {item.error && (
+                                <small className="error-text">
+                                  {item.error}
+                                </small>
+                              )}
+                              {item.destination && <small>Đã sao chép</small>}
+                            </div>
+                          </div>
+                        </td>
+                        <td>{item.kind === "video" ? "Video" : "Ảnh"}</td>
+                        <td className="file-size" title={`${item.size} bytes`}>
+                          {formatBytes(item.size)}
+                        </td>
+                        <td>{categorySelect(item)}</td>
+                        <td className="table-path" title={parent(item.path)}>
+                          {parent(item.path) || "Thư mục gốc"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className={`media-grid ${view}`}>
+                {shown.map((item) => (
+                  <article className="media-card" key={item.path}>
+                    <div className="media-preview">
+                      {mediaPreview(item)}
+                      <label className="card-check">
+                        <input
+                          aria-label={`Chọn ${item.path}`}
+                          type="checkbox"
+                          disabled={busy}
+                          checked={selection.has(item.path)}
+                          onChange={() => toggle(item.path)}
+                        />
+                      </label>
+                      <span className="media-kind">
+                        {item.kind === "video" ? "Video" : "Ảnh"}
+                      </span>
+                    </div>
+                    <div className="media-info">
+                      <h2 title={item.path}>{fileName(item.path)}</h2>
+                      <p className="file-details">
+                        <span
+                          className="file-size"
+                          title={`${item.size} bytes`}
+                        >
+                          {formatBytes(item.size)}
+                        </span>
+                        <span title={parent(item.path)}>
+                          {parent(item.path) || "Thư mục gốc"}
+                        </span>
+                      </p>
+                      {categorySelect(item)}
+                      {item.score !== undefined && (
+                        <small>Điểm AI: {Math.round(item.score * 100)}%</small>
+                      )}
+                      {item.previewError && (
+                        <small>Không tạo được ảnh xem trước</small>
+                      )}
+                      {item.error && (
+                        <small className="error-text">{item.error}</small>
+                      )}
+                      {item.destination && <small>Đã sao chép</small>}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )
+          ) : (
+            (!folderEntries.length || view !== "folders") && (
+              <div className="empty">
+                <h2>
+                  {items.length
+                    ? "Không có file phù hợp"
+                    : "Chưa có ảnh hoặc video"}
+                </h2>
+                <p>
+                  {items.length
+                    ? "Thử bộ lọc khác hoặc quay về thư mục gốc."
+                    : "Mở thư mục để xem các file hiện có. Chỉ khi xác nhận sắp xếp, vị trí file mới thay đổi."}
+                </p>
+                {!items.length && (
+                  <button
+                    className="primary"
+                    onClick={chooseSource}
+                    disabled={busy || !desktop}
+                  >
+                    Mở thư mục để bắt đầu
+                  </button>
+                )}
+              </div>
+            )
+          )}
           <footer>
-            <span>✦ Một góc nhỏ cho những điều đáng nhớ.</span>
-            <span>Ảnh gốc được giữ nguyên · Bạn luôn kiểm soát</span>
+            Ảnh: JPG, PNG, WEBP, BMP, TIFF · Video: MP4, MOV, MKV, AVI, WEBM và
+            các định dạng phổ biến khác.
           </footer>
-        </section>
-      </main>
-      {confirm && (
-        <div className="modal-backdrop">
-          <section
-            className="modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="confirm-title"
-          >
-            <div className="eyebrow">XÁC NHẬN SAO CHÉP</div>
-            <h2 id="confirm-title">Sẵn sàng sắp xếp thư viện?</h2>
+        </main>
+      </div>
+      <dialog
+        ref={dialog}
+        onCancel={() => setPreview(null)}
+        onClose={() => setPreview(null)}
+        aria-labelledby="preview-title"
+      >
+        {preview && (
+          <>
+            <h2 id="preview-title">
+              Xem trước{" "}
+              {preview.request.mode === "inplace"
+                ? "di chuyển tại chỗ"
+                : "sao chép"}
+            </h2>
             <p>
-              Sao chép {classified.filter((p) => !p.destination).length} ảnh vào
-              các thư mục theo nhóm tại:
+              {preview.plan.filter((p) => p.action !== "skip").length} file sẽ{" "}
+              {preview.request.mode === "inplace"
+                ? "đổi vị trí"
+                : "được sao chép"}{" "}
+              ·{" "}
+              {formatBytes(
+                preview.plan
+                  .filter((p) => p.action !== "skip")
+                  .reduce((n, p) => n + p.size, 0),
+              )}
+              . {preview.plan.filter((p) => p.action === "skip").length} file đã
+              đúng vị trí.
             </p>
-            <code>{destination}</code>
+            <p className="destination-path">
+              {preview.request.mode === "inplace"
+                ? preview.request.source
+                : preview.request.destination}
+            </p>
+            <div className="plan-list">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Hiện tại</th>
+                    <th>Sau sắp xếp</th>
+                    <th>Dung lượng</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {preview.plan.map((p) => (
+                    <tr key={p.path}>
+                      <td>{p.path}</td>
+                      <td>
+                        {p.action === "skip" ? "Giữ nguyên: " : ""}
+                        {p.target}
+                      </td>
+                      <td>{formatBytes(p.size)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
             <p>
-              Không xóa ảnh gốc. Tên trùng được thêm số. Ảnh “Cần xem lại” được
-              lưu vào thư mục <b>review</b>. Hủy tác vụ giữ các bản sao đã hoàn
-              tất; nhật ký ghi trong thư mục đích.
+              {preview.request.mode === "inplace"
+                ? "Xác nhận sẽ di chuyển các file nguồn vào thư mục con. Không tạo thêm bản sao."
+                : "Nguồn được giữ nguyên; file trùng tên được thêm số."}{" "}
+              Hủy giữa chừng giữ kết quả đã hoàn tất; app quét lại sau khi di
+              chuyển. Nhật ký được lưu trong thư mục đang sắp xếp.
             </p>
-            <div className="modal-actions">
-              <button className="secondary" onClick={() => setConfirm(false)}>
-                Quay lại
-              </button>
+            <div className="dialog-actions">
+              <button onClick={() => setPreview(null)}>Quay lại</button>
               <button
                 className="primary"
+                disabled={
+                  busy || preview.plan.every((p) => p.action === "skip")
+                }
                 onClick={() => {
-                  setConfirm(false);
-                  void run("copy");
+                  const current = preview;
+                  setPreview(null);
+                  void run({
+                    ...current.request,
+                    operation: "apply",
+                    plan: current.plan,
+                  });
                 }}
               >
-                Xác nhận sao chép
+                Xác nhận{" "}
+                {preview.request.mode === "inplace" ? "di chuyển" : "sao chép"}
               </button>
             </div>
-          </section>
-        </div>
-      )}
+          </>
+        )}
+      </dialog>
     </div>
   );
 }

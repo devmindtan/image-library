@@ -11,7 +11,9 @@ import uuid
 
 from PIL import Image, ImageOps
 
-EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tif', '.tiff'}
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tif', '.tiff'}
+VIDEO_EXTENSIONS = {'.mp4', '.mov', '.mkv', '.avi', '.webm', '.m4v', '.mpeg', '.mpg', '.mts', '.m2ts', '.3gp'}
+EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 CATEGORIES = {
     'landscape': 'a landscape photograph of natural scenery, mountains, sea or forest',
     'portrait': 'a portrait photograph of a person or people',
@@ -38,7 +40,7 @@ def root_path(value):
 def source_path(root, relative):
     rel = Path(relative)
     if rel.is_absolute() or not rel.parts or any(p in ('.', '..') for p in rel.parts):
-        raise ValueError('Đường dẫn ảnh không hợp lệ')
+        raise ValueError('Đường dẫn file không hợp lệ')
     candidate = root
     for part in rel.parts:
         candidate = candidate / part
@@ -46,7 +48,7 @@ def source_path(root, relative):
             raise ValueError('Không xử lý liên kết tượng trưng')
     path = candidate.resolve(strict=True)
     if not path.is_relative_to(root) or not path.is_file() or path.suffix.lower() not in EXTENSIONS:
-        raise ValueError('Ảnh phải nằm trong thư mục nguồn')
+        raise ValueError('File phải nằm trong thư mục nguồn')
     return path
 
 
@@ -64,8 +66,12 @@ def thumbnail(path):
         return 'data:image/jpeg;base64,' + base64.b64encode(out.getvalue()).decode('ascii')
 
 
+def media_kind(path):
+    return 'video' if path.suffix.lower() in VIDEO_EXTENSIONS else 'image'
+
+
 def scan(root, send=emit):
-    count = 0
+    count = total_bytes = image_count = video_count = 0
     def walk_error(error):
         send({'type': 'warning', 'message': str(error)})
     for directory, dirs, files in os.walk(root, followlinks=False, onerror=walk_error):
@@ -74,17 +80,34 @@ def scan(root, send=emit):
             path = Path(directory) / name
             if path.is_symlink() or path.suffix.lower() not in EXTENSIONS:
                 continue
-            relative = str(path.relative_to(root))
+            relative = path.relative_to(root)
             try:
                 stamp = fingerprint(path)
-                thumb = thumbnail(path)
+                kind = media_kind(path)
+                size = path.stat().st_size
+                thumb = ''
+                preview_error = None
+                if kind == 'image':
+                    try:
+                        thumb = thumbnail(path)
+                    except Exception as error:
+                        preview_error = str(error)
+                        send({'type': 'warning', 'message': f'{relative}: không tạo được ảnh xem trước: {error}'})
                 if fingerprint(path) != stamp:
-                    raise ValueError('Ảnh thay đổi khi đọc; hãy quét lại')
-                send({'type': 'photo', 'photo': {'path': relative, 'stamp': stamp, 'thumbnail': thumb}})
+                    raise ValueError('File thay đổi khi đọc; hãy quét lại')
+                category = 'videos' if kind == 'video' else None
+                if kind == 'image' and len(relative.parts) > 1 and relative.parts[0] in {*CATEGORIES, 'review', 'images'}:
+                    category = relative.parts[0]
+                send({'type': 'photo', 'photo': {'path': str(relative), 'stamp': stamp, 'thumbnail': thumb,
+                      'kind': kind, 'size': size, 'modified': path.stat().st_mtime,
+                      'category': category, 'previewError': preview_error}})
                 count += 1
+                total_bytes += size
+                image_count += kind == 'image'
+                video_count += kind == 'video'
             except Exception as error:
                 send({'type': 'warning', 'message': f'{relative}: {error}'})
-    send({'type': 'done', 'count': count})
+    send({'type': 'done', 'count': count, 'bytes': total_bytes, 'images': image_count, 'videos': video_count})
 
 
 class ClipClassifier:
@@ -116,91 +139,139 @@ def classify(root, photos, threshold, send=emit, classifier=None):
         raise ValueError('Ngưỡng phải nằm trong khoảng 0–1')
     if not photos:
         raise ValueError('Chưa có ảnh để phân loại')
-    send({'type': 'status', 'message': 'Đang nạp CLIP (lần đầu cần tải mô hình)…'})
-    model = classifier if classifier is not None else ClipClassifier()
+    model = classifier
     for index, photo in enumerate(photos):
         try:
             path = source_path(root, photo['path'])
             if fingerprint(path) != photo['stamp']:
                 raise ValueError('Ảnh đã thay đổi; hãy quét lại')
-            category, score = model.predict(path)
-            if fingerprint(path) != photo['stamp']:
-                raise ValueError('Ảnh thay đổi trong khi phân loại')
-            send({'type': 'classified', 'path': photo['path'], 'category': category if score >= threshold else 'review', 'score': score})
+            if media_kind(path) == 'video':
+                send({'type': 'classified', 'path': photo['path'], 'category': 'videos'})
+            else:
+                if model is None:
+                    send({'type': 'status', 'message': 'Đang nạp CLIP (lần đầu cần tải mô hình)…'})
+                    try:
+                        model = ClipClassifier()
+                    except Exception as error:
+                        raise RuntimeError(f'Không nạp được CLIP: {error}') from error
+                category, score = model.predict(path)
+                if fingerprint(path) != photo['stamp']:
+                    raise ValueError('Ảnh thay đổi trong khi phân loại')
+                send({'type': 'classified', 'path': photo['path'], 'category': category if score >= threshold else 'review', 'score': score})
+        except RuntimeError:
+            raise
         except Exception as error:
             send({'type': 'photo_error', 'path': photo['path'], 'message': str(error)})
         send({'type': 'progress', 'current': index + 1, 'total': len(photos)})
     send({'type': 'done', 'count': len(photos)})
 
 
-def checked_destination(root, value):
+def checked_destination(root, value, create=True):
     destination = Path(value).expanduser().resolve()
     if destination == root or destination.is_relative_to(root) or root.is_relative_to(destination):
         raise ValueError('Chọn thư mục đích riêng, không chứa hoặc nằm trong thư mục nguồn')
-    destination.mkdir(parents=True, exist_ok=True)
+    if create:
+        destination.mkdir(parents=True, exist_ok=True)
     return destination
 
 
-def copy_photos(root, destination, photos, send=emit):
+def organization_plan(root, photos, mode, strategy, destination=None):
+    """Read-only preview. Recomputed before execution to reject stale/edited plans."""
+    if mode not in {'inplace', 'copy'} or strategy not in {'type', 'content'}:
+        raise ValueError('Chế độ sắp xếp không hợp lệ')
     if not photos:
-        raise ValueError('Không có ảnh đã phân loại để sao chép')
-    destination = checked_destination(root, destination)
-    journal = destination / f'image-library-{uuid.uuid4().hex}.jsonl'
-    copied = 0
+        raise ValueError('Không có file cần sắp xếp')
+    target_root = root if mode == 'inplace' else checked_destination(root, destination, create=False)
+    plan, reserved, seen = [], set(), set()
+    for photo in photos:
+        path = source_path(root, photo['path'])
+        if path in seen:
+            raise ValueError('Danh sách file trùng lặp')
+        seen.add(path)
+        if fingerprint(path) != photo['stamp']:
+            raise ValueError(f'{photo["path"]}: file đã thay đổi; hãy quét lại')
+        kind = media_kind(path)
+        category = 'videos' if kind == 'video' else ('images' if strategy == 'type' else photo.get('category'))
+        if category not in ({*CATEGORIES, 'review', 'images'} if kind == 'image' else {'videos'}):
+            raise ValueError(f'{photo["path"]}: cần chọn nhóm ảnh hoặc chạy phân loại AI trước')
+        folder = target_root / category
+        if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
+            raise ValueError(f'{folder}: nhóm đích phải là thư mục thực')
+        if folder.resolve().parent != target_root:
+            raise ValueError('Thư mục nhóm không hợp lệ')
+        target = folder / path.name
+        skip = mode == 'inplace' and path == target
+        counter = 0
+        while not skip and (target.exists() or target.is_symlink() or os.path.normcase(str(target)) in reserved):
+            counter += 1
+            target = folder / f'{path.stem} ({counter}){path.suffix}'
+        reserved.add(os.path.normcase(str(target)))
+        plan.append({'path': photo['path'], 'stamp': photo['stamp'], 'target': str(target.relative_to(target_root)),
+                     'category': category, 'kind': kind, 'size': path.stat().st_size, 'action': 'skip' if skip else ('move' if mode == 'inplace' else 'copy')})
+    return plan
+
+
+def apply_organization(root, photos, mode, strategy, expected_plan, destination=None, send=emit):
+    plan = organization_plan(root, photos, mode, strategy, destination)
+    if plan != expected_plan:
+        raise ValueError('Thư mục đã thay đổi sau khi xem trước. Hãy tạo lại bản xem trước.')
+    target_root = root if mode == 'inplace' else checked_destination(root, destination)
+    journal = target_root / f'image-library-{uuid.uuid4().hex}.jsonl'
+    completed = skipped = 0
     with journal.open('x', encoding='utf-8') as log:
-        def record(entry):
-            log.write(json.dumps(entry, ensure_ascii=False) + '\n')
+        def record(event):
+            log.write(json.dumps(event, ensure_ascii=False) + '\n')
             log.flush()
             os.fsync(log.fileno())
-        record({'type': 'session', 'source': str(root), 'destination': str(destination)})
+        record({'type': 'session', 'mode': mode, 'source': str(root), 'destination': str(target_root)})
         send({'type': 'status', 'message': f'Nhật ký: {journal}'})
-        for index, photo in enumerate(photos):
+        for index, item in enumerate(plan):
             temp = None
             try:
-                path = source_path(root, photo['path'])
-                if fingerprint(path) != photo['stamp']:
-                    raise ValueError('Ảnh đã thay đổi; hãy quét và phân loại lại')
-                category = photo['category']
-                if category not in {*CATEGORIES, 'review'}:
-                    raise ValueError('Nhóm không hợp lệ')
-                folder = destination / category
-                if folder.is_symlink():
-                    raise ValueError('Thư mục đích không được là liên kết tượng trưng')
+                path = source_path(root, item['path'])
+                if fingerprint(path) != item['stamp']:
+                    raise ValueError('File đã thay đổi; hãy quét lại')
+                if item['action'] == 'skip':
+                    skipped += 1
+                    continue
+                target = target_root / item['target']
+                folder = target.parent
+                if folder.is_symlink() or folder.resolve().parent != target_root:
+                    raise ValueError('Thư mục đích đã thay đổi')
                 folder.mkdir(exist_ok=True)
-                if folder.resolve().parent != destination:
-                    raise ValueError('Thư mục đích không hợp lệ')
-                with tempfile.NamedTemporaryFile(dir=folder, prefix='.image-library-', suffix='.partial', delete=False) as stream:
-                    temp = Path(stream.name)
-                    record({'type': 'pending', 'source': str(path), 'temporary': str(temp)})
-                    with path.open('rb') as source:
-                        shutil.copyfileobj(source, stream)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                if fingerprint(path) != photo['stamp']:
-                    raise ValueError('Ảnh thay đổi trong khi sao chép')
-                shutil.copystat(path, temp)
-                counter = 0
-                while True:
-                    target = folder / (path.name if counter == 0 else f'{path.stem} ({counter}){path.suffix}')
-                    record({'type': 'publishing', 'source': str(path), 'destination': str(target), 'temporary': str(temp)})
-                    try:
-                        # Atomic, exclusive publication: never overwrite an existing file.
-                        os.link(temp, target)
-                        break
-                    except FileExistsError:
-                        counter += 1
-                temp.unlink()
-                record({'type': 'copied', 'source': str(path), 'destination': str(target)})
-                copied += 1
-                send({'type': 'copied', 'path': photo['path'], 'destination': str(target)})
+                record({'type': 'pending', 'source': str(path), 'destination': str(target), 'action': item['action']})
+                if mode == 'inplace':
+                    # Link then unlink: cancellation can leave duplicates, never remove the only copy.
+                    os.link(path, target)
+                    record({'type': 'linked', 'source': str(path), 'destination': str(target)})
+                    if fingerprint(path) != item['stamp']:
+                        raise ValueError('File thay đổi khi sắp xếp; giữ cả hai đường dẫn để kiểm tra')
+                    path.unlink()
+                    record({'type': 'moved', 'source': str(path), 'destination': str(target)})
+                    send({'type': 'moved', 'path': item['path'], 'newPath': item['target'], 'category': item['category'], 'stamp': fingerprint(target)})
+                else:
+                    with tempfile.NamedTemporaryFile(dir=folder, prefix='.image-library-', suffix='.partial', delete=False) as stream:
+                        temp = Path(stream.name)
+                        record({'type': 'temporary', 'path': str(temp)})
+                        with path.open('rb') as original:
+                            shutil.copyfileobj(original, stream)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    if fingerprint(path) != item['stamp']:
+                        raise ValueError('File thay đổi khi sao chép')
+                    shutil.copystat(path, temp)
+                    os.link(temp, target)
+                    record({'type': 'copied', 'source': str(path), 'destination': str(target)})
+                    send({'type': 'copied', 'path': item['path'], 'destination': str(target)})
+                completed += 1
             except Exception as error:
-                record({'type': 'error', 'path': photo.get('path'), 'message': str(error)})
-                send({'type': 'photo_error', 'path': photo.get('path'), 'message': str(error)})
+                record({'type': 'error', 'path': item['path'], 'message': str(error)})
+                send({'type': 'photo_error', 'path': item['path'], 'message': str(error)})
             finally:
                 if temp is not None:
                     temp.unlink(missing_ok=True)
-            send({'type': 'progress', 'current': index + 1, 'total': len(photos)})
-    send({'type': 'done', 'count': copied, 'journal': str(journal)})
+                send({'type': 'progress', 'current': index + 1, 'total': len(plan)})
+    send({'type': 'done', 'count': completed, 'skipped': skipped, 'journal': str(journal)})
 
 
 def main():
@@ -212,8 +283,12 @@ def main():
             scan(root)
         elif operation == 'classify':
             classify(root, request['photos'], float(request.get('threshold', .55)))
-        elif operation == 'copy':
-            copy_photos(root, request['destination'], request['photos'])
+        elif operation == 'plan':
+            plan = organization_plan(root, request['photos'], request['mode'], request['strategy'], request.get('destination'))
+            emit({'type': 'plan', 'plan': plan})
+            emit({'type': 'done', 'count': len(plan)})
+        elif operation == 'apply':
+            apply_organization(root, request['photos'], request['mode'], request['strategy'], request['plan'], request.get('destination'))
         else:
             raise ValueError('Thao tác không được hỗ trợ')
     except Exception as error:
