@@ -991,3 +991,148 @@ dialog > p {
   border-top-width: 7px;
   border-bottom-width: 7px;
 }
+.open-media {
+  display: block;
+  border: 0;
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  width: 100%;
+  height: 100%;
+}
+.open-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.preview-button {
+  padding: 0;
+  border: 0;
+}
+.file-actions {
+  display: flex;
+  gap: 6px;
+}
+.file-actions button {
+  font-size: 11px;
+  padding: 5px 7px;
+}
+.danger {
+  color: #a24238;
+  border-color: #d9b5b1;
+}
+.row-delete {
+  font-size: 11px;
+  padding: 4px 8px;
+  margin: 4px;
+}
+.trash-list {
+  max-height: 40vh;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding-left: 20px;
+  font-size: 13px;
+}
+.group-explanation {
+  background: #f3f6ee;
+  padding: 10px;
+  border-radius: 5px;
+}
+.viewer {
+  width: min(1100px, calc(100vw - 24px));
+}
+.viewer-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 15px;
+  align-items: flex-start;
+}
+.viewer-heading h2 {
+  overflow-wrap: anywhere;
+  font-size: 17px;
+  min-width: 0;
+}
+.viewer-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+.viewer-controls button {
+  font-size: 12px;
+}
+.viewer-controls .danger {
+  margin-left: auto;
+}
+.viewer-media {
+  background: #18221c;
+  max-height: 65vh;
+  min-height: 180px;
+  overflow: auto;
+  display: block;
+  text-align: center;
+}
+.viewer-media img {
+  object-fit: contain;
+  display: block;
+  margin: auto;
+}
+.viewer-media video {
+  display: block;
+  width: 100%;
+  max-height: 65vh;
+}
+.viewer-media > p {
+  color: white;
+  padding: 40px;
+}
+.metadata {
+  margin-top: 18px;
+  font-size: 12px;
+}
+.metadata summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.metadata h3 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 12px 0 7px;
+}
+.metadata dl > div {
+  display: grid;
+  grid-template-columns: minmax(100px, 180px) minmax(0, 1fr);
+  gap: 12px;
+  padding: 6px;
+  border-bottom: 1px solid #e4e8df;
+}
+.metadata dt {
+  color: #7b8872;
+}
+.metadata dd,
+.metadata pre {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  min-width: 0;
+}
+.viewer > p[role="alert"] {
+  color: #a24238;
+}
+@media (max-width: 600px) {
+  .file-actions {
+    flex-wrap: wrap;
+  }
+  .viewer {
+    padding: 14px;
+  }
+  .metadata dl > div {
+    grid-template-columns: minmax(80px, 110px) minmax(0, 1fr);
+  }
+  .viewer-controls {
+    gap: 5px;
+  }
+  .viewer-controls button {
+    padding: 6px 8px;
+  }
+}

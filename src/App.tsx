@@ -1,6 +1,8 @@
 import { useMemo, useRef, useState, useEffect } from "react";
-import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
+import { Channel, invoke, isTauri, convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+
+import MediaViewer from "./MediaViewer";
 
 type Media = {
   path: string;
@@ -52,6 +54,7 @@ type WorkerEvent = {
   destination?: string;
   journal?: string;
   plan?: PlanItem[];
+  detail?: Record<string, unknown>;
 };
 type View = "grid" | "compact" | "list" | "folders";
 const groups: Record<string, string> = {
@@ -93,6 +96,16 @@ function initialView(): View {
 }
 
 export default function App() {
+  const [viewer, setViewer] = useState<Media | null>(null);
+  const [mediaUrl, setMediaUrl] = useState("");
+  const [detail, setDetail] = useState<Record<string, unknown> | null>(null);
+  const [trashSelection, setTrashSelection] = useState<Media[] | null>(null);
+  const trashDialog = useRef<HTMLDialogElement>(null);
+  const viewerToken = useRef(0);
+  useEffect(() => {
+    if (trashSelection) trashDialog.current?.showModal();
+    else trashDialog.current?.close();
+  }, [trashSelection]);
   const [source, setSource] = useState("");
   const [destination, setDestination] = useState("");
   const [items, setItems] = useState<Media[]>([]);
@@ -215,6 +228,15 @@ export default function App() {
     const onEvent = new Channel<WorkerEvent>();
     onEvent.onmessage = (e) => {
       if (active.current !== id) return;
+      if (e.type === "metadata" && e.detail) setDetail(e.detail);
+      if (e.type === "trashed") {
+        setItems((p) => p.filter((x) => x.path !== e.path));
+        setSelection((old) => {
+          const next = new Set(old);
+          next.delete(e.path!);
+          return next;
+        });
+      }
       if (e.type === "photo" && e.photo) setItems((p) => [...p, e.photo!]);
       if (e.type === "classified")
         setItems((p) =>
@@ -266,13 +288,17 @@ export default function App() {
       if (e.type === "done") {
         setProgress(100);
         resultMessage =
-          request.operation === "scan"
-            ? `Đã hiển thị ${e.count} file. Chưa thay đổi file nào.`
-            : request.operation === "classify"
-              ? "Đã xử lý phân loại. Bạn có thể chỉnh nhóm từng ảnh."
-              : request.operation === "plan"
-                ? "Kiểm tra đường dẫn trước khi xác nhận."
-                : `Đã ${request.mode === "inplace" ? "di chuyển" : "sao chép"} ${e.count} file, giữ nguyên ${e.skipped || 0} file đúng vị trí. Nhật ký: ${e.journal}`;
+          request.operation === "metadata"
+            ? "Đã đọc metadata."
+            : request.operation === "trash"
+              ? `Đã chuyển ${e.count} file vào Thùng rác. Nhật ký: ${e.journal}`
+              : request.operation === "scan"
+                ? `Đã hiển thị ${e.count} file. Chưa thay đổi file nào.`
+                : request.operation === "classify"
+                  ? "Đã xử lý phân loại. Bạn có thể chỉnh nhóm từng ảnh."
+                  : request.operation === "plan"
+                    ? "Kiểm tra đường dẫn trước khi xác nhận."
+                    : `Đã ${request.mode === "inplace" ? "di chuyển" : "sao chép"} ${e.count} file, giữ nguyên ${e.skipped || 0} file đúng vị trí. Nhật ký: ${e.journal}`;
         setMessage(resultMessage);
       }
     };
@@ -297,6 +323,48 @@ export default function App() {
       setMessage(resultMessage + " Đã quét lại thư mục.");
     }
     return success;
+  }
+  async function openViewer(item: Media) {
+    if (busy) return;
+    const token = ++viewerToken.current;
+    setViewer(item);
+    setDetail(null);
+    setMediaUrl("");
+    if (demo) {
+      setMediaUrl(item.thumbnail);
+      setDetail({
+        general: {
+          "Tên file": item.path,
+          "Dung lượng (bytes)": item.size,
+          "Lưu ý": "Dữ liệu minh họa",
+        },
+      });
+      return;
+    }
+    void run({ operation: "metadata", source, photos: payload([item]) });
+    try {
+      const path = await invoke<string>("authorize_media", {
+        source,
+        path: item.path,
+      });
+      if (viewerToken.current === token) setMediaUrl(convertFileSrc(path));
+    } catch (error) {
+      notify(String(error));
+      if (viewerToken.current === token)
+        setDetail({ warnings: [String(error)] });
+    }
+  }
+  function closeViewer() {
+    viewerToken.current++;
+    setViewer(null);
+    setMediaUrl("");
+    if (active.current) void cancel();
+  }
+  function stepViewer(step: number) {
+    if (!viewer) return;
+    const index = filtered.findIndex((p) => p.path === viewer.path);
+    const next = filtered[(index + step + filtered.length) % filtered.length];
+    if (next) void openViewer(next);
   }
   async function chooseSource() {
     try {
@@ -481,7 +549,7 @@ export default function App() {
             ))}
           </nav>
           <details className="category-filters">
-            <summary>Nhóm nội dung ảnh</summary>
+            <summary>Lọc theo nhãn ảnh</summary>
             {Object.entries(groups)
               .filter(([key]) => !["images", "videos"].includes(key))
               .map(([key, label]) => {
@@ -565,7 +633,7 @@ export default function App() {
                 </select>
               </label>
               <label>
-                Phân nhóm
+                Tạo thư mục theo
                 <select
                   aria-label="Cách phân nhóm"
                   value={strategy}
@@ -601,6 +669,12 @@ export default function App() {
                 Xem trước sắp xếp
               </button>
             </div>
+            <p className="group-explanation">
+              Nhãn ảnh mô tả nội dung để lọc thư viện. “Tạo thư mục theo” quyết
+              định thư mục đích khi sắp xếp: ví dụ Phong cảnh → landscape/,
+              Video → videos/. Chạy AI hoặc đổi nhãn chưa di chuyển file; chỉ
+              xác nhận sắp xếp mới thay đổi vị trí.
+            </p>
             <p>
               {mode === "inplace"
                 ? "Di chuyển vào thư mục con của thư mục đang mở. Không nhân đôi file."
@@ -768,6 +842,15 @@ export default function App() {
                 Chọn tất cả file đang lọc
               </label>
               {selection.size > 0 && (
+                <button
+                  className="danger"
+                  disabled={busy || demo || !desktop}
+                  onClick={() => setTrashSelection(selectedItems)}
+                >
+                  Xóa {selection.size} file đã chọn
+                </button>
+              )}
+              {selection.size > 0 && (
                 <button onClick={() => setSelection(new Set())} disabled={busy}>
                   Bỏ chọn
                 </button>
@@ -831,9 +914,14 @@ export default function App() {
                         </td>
                         <td>
                           <div className="table-file">
-                            <div className="table-preview">
+                            <button
+                              className="table-preview preview-button"
+                              aria-label={`Mở ${item.path}`}
+                              disabled={busy}
+                              onClick={() => void openViewer(item)}
+                            >
                               {mediaPreview(item)}
-                            </div>
+                            </button>
                             <div>
                               <strong title={item.path}>
                                 {fileName(item.path)}
@@ -854,7 +942,16 @@ export default function App() {
                         <td className="file-size" title={`${item.size} bytes`}>
                           {formatBytes(item.size)}
                         </td>
-                        <td>{categorySelect(item)}</td>
+                        <td>
+                          {categorySelect(item)}
+                          <button
+                            className="danger row-delete"
+                            disabled={busy || demo || !desktop}
+                            onClick={() => setTrashSelection([item])}
+                          >
+                            Xóa
+                          </button>
+                        </td>
                         <td className="table-path" title={parent(item.path)}>
                           {parent(item.path) || "Thư mục gốc"}
                         </td>
@@ -868,7 +965,14 @@ export default function App() {
                 {shown.map((item) => (
                   <article className="media-card" key={item.path}>
                     <div className="media-preview">
-                      {mediaPreview(item)}
+                      <button
+                        className="open-media"
+                        aria-label={`Mở ${item.path}`}
+                        disabled={busy}
+                        onClick={() => void openViewer(item)}
+                      >
+                        {mediaPreview(item)}
+                      </button>
                       <label className="card-check">
                         <input
                           aria-label={`Chọn ${item.path}`}
@@ -896,6 +1000,21 @@ export default function App() {
                         </span>
                       </p>
                       {categorySelect(item)}
+                      <div className="file-actions">
+                        <button
+                          disabled={busy}
+                          onClick={() => void openViewer(item)}
+                        >
+                          Xem / Chi tiết
+                        </button>
+                        <button
+                          className="danger"
+                          disabled={busy || demo || !desktop}
+                          onClick={() => setTrashSelection([item])}
+                        >
+                          Xóa
+                        </button>
+                      </div>
                       {item.score !== undefined && (
                         <small>Điểm AI: {Math.round(item.score * 100)}%</small>
                       )}
@@ -942,6 +1061,62 @@ export default function App() {
           </footer>
         </main>
       </div>
+      {viewer && (
+        <MediaViewer
+          item={viewer}
+          url={mediaUrl}
+          detail={detail}
+          busy={busy}
+          onClose={closeViewer}
+          onStep={stepViewer}
+          onDelete={() => {
+            setTrashSelection([viewer]);
+            closeViewer();
+          }}
+        />
+      )}
+      <dialog
+        ref={trashDialog}
+        onCancel={() => setTrashSelection(null)}
+        onClose={() => setTrashSelection(null)}
+        aria-labelledby="trash-title"
+      >
+        {trashSelection && (
+          <>
+            <h2 id="trash-title">
+              Chuyển {trashSelection.length} file vào Thùng rác?
+            </h2>
+            <p>
+              {formatBytes(bytesOf(trashSelection))}. Có thể khôi phục qua Thùng
+              rác của hệ điều hành. Nếu Thùng rác không khả dụng, app báo lỗi và
+              giữ file; không xóa vĩnh viễn.
+            </p>
+            <ul className="trash-list">
+              {trashSelection.map((p) => (
+                <li key={p.path}>{p.path}</li>
+              ))}
+            </ul>
+            <div className="dialog-actions">
+              <button onClick={() => setTrashSelection(null)}>Giữ lại</button>
+              <button
+                className="danger"
+                disabled={busy}
+                onClick={() => {
+                  const list = trashSelection;
+                  setTrashSelection(null);
+                  void run({
+                    operation: "trash",
+                    source,
+                    photos: payload(list),
+                  });
+                }}
+              >
+                Xác nhận chuyển vào Thùng rác
+              </button>
+            </div>
+          </>
+        )}
+      </dialog>
       <dialog
         ref={dialog}
         onCancel={() => setPreview(null)}

@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Local window with native folder selection only",
+  "description": "Local window with native folder selection and individually authorized media viewing",
   "windows": ["main"],
   "permissions": ["core:default", "dialog:allow-open"]
 }
