@@ -62,9 +62,18 @@ with tempfile.TemporaryDirectory() as directory, sync_playwright() as p:
     assert page.locator('.summary').inner_text().count('Video') == 1
     assert '3 file' in page.locator('.summary').inner_text()
     assert '12,7 KB' in page.locator('.summary').inner_text()
+    # AI remains the default workflow and visible without changing any setting.
+    assert page.get_by_role('combobox', name='Cách phân nhóm').input_value() == 'content'
+    assert page.get_by_role('button', name='Phân loại ảnh bằng AI').is_visible()
+    page.get_by_role('button', name='Phân loại ảnh bằng AI').click()
+    page.wait_for_function("document.querySelector('.activity').textContent.includes('Đã xử lý')")
+    assert page.get_by_role('combobox', name='Nhóm của forest.png', exact=True).input_value() == 'landscape'
+    page.get_by_role('combobox', name='Cách phân nhóm').select_option('type')
+    assert page.get_by_role('button', name='Phân loại ảnh bằng AI').is_visible()
     # Filter/video recognition and multiple view modes.
     page.locator('.sidebar nav button').nth(2).click()
     assert page.locator('.media-card').count() == 1
+    assert page.get_by_role('button', name='Phân loại ảnh bằng AI').is_disabled()
     assert 'trip.mp4' in page.locator('.media-card').inner_text()
     assert '1 file · 12,7 KB' in page.locator('.library-meta').inner_text()
     page.get_by_role('checkbox', name='Chọn trip.mp4', exact=True).check()
@@ -96,8 +105,8 @@ with tempfile.TemporaryDirectory() as directory, sync_playwright() as p:
     assert not (source / 'images').exists()
     # Copy mode with AI fixtures + manual image category. Video must bypass AI.
     page.get_by_role('combobox', name='Thao tác sắp xếp').select_option('copy')
-    page.get_by_role('combobox', name='Cách phân nhóm').select_option('content')
     page.get_by_role('button', name='Phân loại ảnh bằng AI').click()
+    assert page.get_by_role('combobox', name='Cách phân nhóm').input_value() == 'content'
     page.wait_for_function("document.querySelector('.activity').textContent.includes('Đã xử lý')")
     page.get_by_role('combobox', name='Nhóm của forest.png', exact=True).select_option('review')
     page.get_by_role('button', name='Chọn nơi lưu').click()
